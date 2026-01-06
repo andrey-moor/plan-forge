@@ -1,0 +1,130 @@
+version: "1.0.0"
+title: "Plan Reviewer"
+description: "Reviews development plans for gaps, clarity, and feasibility"
+
+instructions: |
+  You are a critical reviewer examining development plans.
+  Your role is to identify issues, gaps, and areas for improvement.
+
+  ## Review Criteria
+
+  1. **Completeness**: Are all aspects of the task covered?
+  2. **Clarity**: Are descriptions specific and actionable?
+  3. **Feasibility**: Are tasks realistic and well-scoped?
+  4. **Dependencies**: Are phase dependencies correct and complete?
+  5. **Acceptance Criteria**: Are they testable and measurable?
+  6. **Risks**: Are potential issues identified with mitigations?
+  7. **File References**: Do the referenced files make sense?
+
+  ## Verification Process
+
+  Use available tools to VERIFY claims in the plan:
+  - Check if referenced files exist in the codebase
+  - Validate that code patterns mentioned actually exist
+  - Assess if acceptance criteria are actually testable
+  - Verify dependencies between phases are logical
+
+  ## Scoring Guidelines
+
+  - 0.9-1.0: Excellent, minor or no issues
+  - 0.7-0.9: Good, some improvements needed
+  - 0.5-0.7: Fair, significant gaps to address
+  - 0.0-0.5: Poor, major revision needed
+
+  ## Human Input Required
+
+  If you identify any of the following, set requires_human_input: true:
+  - Security vulnerabilities that need human verification
+  - Ambiguous requirements you cannot resolve
+  - Critical decisions that should be made by a human
+  - Multiple valid architectural approaches where human preference matters
+
+  Explain in human_input_reason what input is needed from the human.
+
+  ## Output Format
+
+  You MUST call the `final_output` tool with your review as a JSON object.
+  The schema is provided in the tool definition.
+
+  Be specific about:
+  - What gaps exist and where in the plan
+  - What needs clarification and why
+  - What suggestions would improve the plan
+  - Your overall score with justification
+  - Whether human input is required and why
+
+extensions:
+  - name: developer
+    type: builtin
+    description: "Developer tools for verification"
+    timeout: 300
+  - name: context7
+    type: stdio
+    cmd: npx
+    args: ["-y", "@upstash/context7-mcp@latest"]
+    description: "Up-to-date documentation and code examples for libraries"
+    timeout: 60
+
+settings:
+  goose_provider: anthropic
+  goose_model: claude-opus-4-5-20251101
+
+response:
+  json_schema:
+    type: object
+    properties:
+      overall_assessment:
+        type: string
+        description: "High-level summary of the plan quality and main findings"
+      gaps:
+        type: array
+        items:
+          type: object
+          properties:
+            description:
+              type: string
+            location:
+              type: string
+              description: "Where in the plan the gap exists (e.g., 'Phase 2, Task 3')"
+            severity:
+              type: string
+              enum: [error, warning, info]
+            suggested_fix:
+              type: string
+          required: [description, severity]
+      unclear_areas:
+        type: array
+        items:
+          type: object
+          properties:
+            description:
+              type: string
+            questions:
+              type: array
+              items: { type: string }
+          required: [description, questions]
+      suggestions:
+        type: array
+        items:
+          type: object
+          properties:
+            description:
+              type: string
+            rationale:
+              type: string
+            priority:
+              type: string
+              enum: [required, recommended, optional]
+          required: [description, rationale, priority]
+      score:
+        type: number
+        minimum: 0
+        maximum: 1
+        description: "Overall score from 0.0 to 1.0"
+      requires_human_input:
+        type: boolean
+        description: "Set true if human input is needed before continuing"
+      human_input_reason:
+        type: string
+        description: "Explanation of what input is needed from human"
+    required: [overall_assessment, gaps, unclear_areas, suggestions, score]

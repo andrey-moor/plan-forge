@@ -1,0 +1,174 @@
+version: "1.0.0"
+title: "Strategic Planner"
+description: "Generates comprehensive development plans with iterative refinement"
+
+instructions: |
+  You are an elite strategic planning specialist for AI-driven development.
+  Your goal is to create comprehensive, actionable plans that are:
+  - Specific and deterministic (no "might", "consider", "as needed")
+  - Well-structured with clear phases and checkpoints
+  - Complete with acceptance criteria, file references, and risks
+
+  ## Planning Process
+
+  1. **Understand the Task**: Parse the task description carefully
+  2. **Explore the Codebase**: Use available tools to understand the current state
+  3. **Identify Patterns**: Find existing patterns to follow
+  4. **Design Phases**: Break work into logical phases with clear dependencies
+  5. **Define Tasks**: Create specific, actionable tasks for each phase
+  6. **Set Acceptance Criteria**: Define measurable success conditions
+  7. **Identify Risks**: Flag potential issues with mitigations
+
+  ## Quality Standards
+
+  - Use deterministic language: "Create X" not "Consider creating X"
+  - Be specific: "Add to src/auth.ts" not "Add to auth file"
+  - State facts: "Will require" not "Might require"
+  - Each task should have clear file references
+  - Acceptance criteria must be testable
+
+  ## Output Format
+
+  You MUST call the `final_output` tool with your plan as a JSON object.
+  The schema is provided in the tool definition.
+
+extensions:
+  - name: developer
+    type: builtin
+    description: "Developer tools for file operations"
+    timeout: 300
+  - name: context7
+    type: stdio
+    cmd: npx
+    args: ["-y", "@upstash/context7-mcp@latest"]
+    description: "Up-to-date documentation and code examples for libraries"
+    timeout: 60
+
+settings:
+  goose_provider: anthropic
+  goose_model: claude-opus-4-5-20251101
+
+response:
+  json_schema:
+    type: object
+    properties:
+      title:
+        type: string
+        description: "Short descriptive title for the plan"
+      description:
+        type: string
+        description: "Overview of what the plan accomplishes"
+      tier:
+        type: string
+        enum: [quick, standard, strategic]
+        description: "Complexity tier of the plan"
+      context:
+        type: object
+        properties:
+          problem_statement:
+            type: string
+          constraints:
+            type: array
+            items: { type: string }
+          assumptions:
+            type: array
+            items: { type: string }
+          existing_patterns:
+            type: array
+            items: { type: string }
+        required: [problem_statement, constraints, assumptions, existing_patterns]
+      phases:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            goal:
+              type: string
+            tier:
+              type: string
+              enum: [foundation, core, enhancement, polish]
+            checkpoints:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  description:
+                    type: string
+                  tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        description:
+                          type: string
+                        file_references:
+                          type: array
+                          items: { type: string }
+                        implementation_notes:
+                          type: string
+                      required: [description, file_references]
+                  validation:
+                    type: string
+                required: [id, description, tasks]
+            dependencies:
+              type: array
+              items: { type: string }
+          required: [name, goal, tier, checkpoints, dependencies]
+      acceptance_criteria:
+        type: array
+        items:
+          type: object
+          properties:
+            description:
+              type: string
+            testable:
+              type: boolean
+            priority:
+              type: string
+              enum: [required, recommended, optional]
+          required: [description, testable, priority]
+      file_references:
+        type: array
+        items:
+          type: object
+          properties:
+            path:
+              type: string
+            exists:
+              type: boolean
+            action:
+              type: string
+              enum: [create, modify, reference, delete]
+            description:
+              type: string
+          required: [path, action, description]
+      risks:
+        type: array
+        items:
+          type: object
+          properties:
+            description:
+              type: string
+            severity:
+              type: string
+              enum: [error, warning, info]
+            mitigation:
+              type: string
+          required: [description, severity, mitigation]
+      metadata:
+        type: object
+        properties:
+          version:
+            type: integer
+          created_at:
+            type: string
+          last_updated:
+            type: string
+          iteration:
+            type: integer
+        required: [version, created_at, last_updated, iteration]
+    required: [title, description, tier, context, phases, acceptance_criteria, file_references, risks, metadata]

@@ -1,0 +1,18 @@
+planning:
+  recipe: recipes/planner.yaml
+  provider_override: null
+  model_override: null
+
+review:
+  recipe: recipes/reviewer.yaml
+  provider_override: null
+  model_override: null
+  pass_threshold: 0.8
+
+loop_config:
+  max_iterations: 5
+  early_exit_on_perfect_score: true
+
+output:
+  runs_dir: ./runs
+  active_dir: ./dev/active
