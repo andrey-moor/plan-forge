@@ -55,11 +55,23 @@ cargo clippy
 
 ### Output Structure
 
-- **Intermediate files**: `~/.config/plan-forge/runs/<task-slug>/` (JSON files, not committed)
+- **Session files**: `.plan-forge/<task-slug>/` (JSON files, gitignore `.plan-forge/.goose/`)
 - **Final files**: `./dev/active/<task-slug>/` (markdown files, committed to repo)
   - `<task-slug>-plan.md`: Overview and phases
   - `<task-slug>-tasks.md`: Detailed task list
   - `<task-slug>-context.md`: Context for handoff
+
+### MCP Server
+
+```bash
+# Run plan-forge MCP server
+plan-forge mcp plan-forge
+
+# Run developer tools server (from goose)
+plan-forge mcp developer
+```
+
+Available tools via MCP: `plan_run`, `plan_status`, `plan_list`, `plan_get`, `plan_approve`
 
 ## Architecture
 
@@ -95,7 +107,7 @@ cargo run -- run --path dev/active/add-user-authentication/ \
 
 The `--path <directory>` feature:
 1. Derives task slug from directory name
-2. Loads latest plan from `runs/<task-slug>/`
+2. Loads latest plan from `.plan-forge/<task-slug>/`
 3. Treats `--task` as user feedback
 4. Planner updates the plan based on feedback
 5. Review loop continues until passing

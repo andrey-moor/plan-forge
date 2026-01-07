@@ -42,12 +42,16 @@ pub struct LoopConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
-    /// Service directory for intermediate JSON files
-    /// Defaults to $GOOSE_PATH_ROOT/runs/ or ~/.config/plan-forge/runs/
+    /// Session directory for intermediate JSON files
+    /// Defaults to .plan-forge/ (slug appended by CLI)
     pub runs_dir: PathBuf,
     /// Final output directory for committed plan files
-    /// Defaults to working_dir/dev/active/
+    /// Defaults to ./dev/active/
     pub active_dir: PathBuf,
+    /// Session slug (used for output directory name)
+    /// If None, derived from plan title
+    #[serde(skip)]
+    pub slug: Option<String>,
 }
 
 impl Default for CliConfig {
@@ -69,8 +73,9 @@ impl Default for CliConfig {
                 early_exit_on_perfect_score: true,
             },
             output: OutputConfig {
-                runs_dir: PathBuf::from("./runs"),
+                runs_dir: PathBuf::from("./.plan-forge"),
                 active_dir: PathBuf::from("./dev/active"),
+                slug: None,
             },
         }
     }
@@ -90,5 +95,86 @@ impl CliConfig {
             Some(p) if p.exists() => Self::from_file(p),
             _ => Ok(Self::default()),
         }
+    }
+
+    /// Apply environment variable overrides.
+    ///
+    /// Environment variables (PLAN_FORGE_*) override config file values
+    /// but are themselves overridden by CLI arguments.
+    ///
+    /// Supported environment variables:
+    /// - PLAN_FORGE_THRESHOLD: Review pass threshold (0.0-1.0)
+    /// - PLAN_FORGE_MAX_ITERATIONS: Maximum planning iterations
+    /// - PLAN_FORGE_PLANNER_PROVIDER: Provider for planner (e.g., "anthropic")
+    /// - PLAN_FORGE_PLANNER_MODEL: Model for planner
+    /// - PLAN_FORGE_REVIEWER_PROVIDER: Provider for reviewer
+    /// - PLAN_FORGE_REVIEWER_MODEL: Model for reviewer
+    /// - PLAN_FORGE_RECIPE_DIR: Directory to search for recipes
+    pub fn apply_env_overrides(mut self) -> Self {
+        // Threshold
+        if let Ok(val) = std::env::var("PLAN_FORGE_THRESHOLD")
+            && let Ok(threshold) = val.parse::<f32>()
+        {
+            self.review.pass_threshold = threshold.clamp(0.0, 1.0);
+        }
+
+        // Max iterations
+        if let Ok(val) = std::env::var("PLAN_FORGE_MAX_ITERATIONS")
+            && let Ok(max) = val.parse::<u32>()
+        {
+            self.loop_config.max_iterations = max;
+        }
+
+        // Planner provider
+        if let Ok(val) = std::env::var("PLAN_FORGE_PLANNER_PROVIDER")
+            && !val.is_empty()
+        {
+            self.planning.provider_override = Some(val);
+        }
+
+        // Planner model
+        if let Ok(val) = std::env::var("PLAN_FORGE_PLANNER_MODEL")
+            && !val.is_empty()
+        {
+            self.planning.model_override = Some(val);
+        }
+
+        // Reviewer provider
+        if let Ok(val) = std::env::var("PLAN_FORGE_REVIEWER_PROVIDER")
+            && !val.is_empty()
+        {
+            self.review.provider_override = Some(val);
+        }
+
+        // Reviewer model
+        if let Ok(val) = std::env::var("PLAN_FORGE_REVIEWER_MODEL")
+            && !val.is_empty()
+        {
+            self.review.model_override = Some(val);
+        }
+
+        // Recipe directory (prepended to recipe paths if they're relative)
+        if let Ok(val) = std::env::var("PLAN_FORGE_RECIPE_DIR")
+            && !val.is_empty()
+        {
+            let recipe_dir = PathBuf::from(&val);
+            // Only modify if the current recipe paths are relative
+            if self.planning.recipe.is_relative() {
+                self.planning.recipe = recipe_dir.join(&self.planning.recipe);
+            }
+            if self.review.recipe.is_relative() {
+                self.review.recipe = recipe_dir.join(&self.review.recipe);
+            }
+        }
+
+        self
+    }
+
+    /// Load configuration with environment variable overrides applied.
+    ///
+    /// Priority: Config file > Env vars > Defaults
+    /// (CLI args override everything, applied separately in main.rs)
+    pub fn load_with_env(path: Option<&PathBuf>) -> anyhow::Result<Self> {
+        Self::load_or_default(path).map(|c| c.apply_env_overrides())
     }
 }

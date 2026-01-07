@@ -259,7 +259,12 @@ impl OutputWriter for FileOutputWriter {
         self.ensure_active_dir().await?;
         self.ensure_runs_dir().await?;
 
-        let task_name = slugify(&plan.title);
+        // Use configured slug if available, otherwise derive from plan title
+        let task_name = self
+            .config
+            .slug
+            .clone()
+            .unwrap_or_else(|| slugify(&plan.title));
 
         // Create task directory in active_dir for final MD files
         let task_dir = self.config.active_dir.join(&task_name);

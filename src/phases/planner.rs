@@ -14,6 +14,7 @@ use goose::session::{session_manager::SessionType, SessionManager};
 use crate::config::PlanningConfig;
 use crate::models::Plan;
 use crate::orchestrator::LoopState;
+use crate::recipes::load_recipe;
 
 use super::Planner;
 
@@ -51,10 +52,8 @@ impl GoosePlanner {
     }
 
     async fn run_agent(&self, prompt: &str, state: &LoopState) -> Result<String> {
-        // Load recipe
-        let recipe_path = self.base_dir.join(&self.config.recipe);
-        let recipe = Recipe::from_file_path(&recipe_path)
-            .context(format!("Failed to load recipe from {:?}", recipe_path))?;
+        // Load recipe (with fallback to bundled default)
+        let recipe = load_recipe(&self.config.recipe, &self.base_dir, "planner")?;
 
         // Create provider
         let provider = self.create_provider(&recipe).await?;

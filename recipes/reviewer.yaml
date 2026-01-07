@@ -14,32 +14,116 @@ instructions: |
   4. **Dependencies**: Are phase dependencies correct and complete?
   5. **Acceptance Criteria**: Are they testable and measurable?
   6. **Risks**: Are potential issues identified with mitigations?
-  7. **File References**: Do the referenced files make sense?
+  7. **File References**: Do the referenced files make sense? Are they `file:line` specific?
+  8. **Pattern Adherence**: Does the plan follow existing codebase patterns?
 
-  ## Verification Process
+  ## Verification Process (REQUIRED)
 
   Use available tools to VERIFY claims in the plan:
-  - Check if referenced files exist in the codebase
-  - Validate that code patterns mentioned actually exist
+  - Check if referenced files exist at the specified paths
+  - Validate that code patterns mentioned actually exist (read the files!)
+  - Verify `file:line` references point to relevant code
   - Assess if acceptance criteria are actually testable
   - Verify dependencies between phases are logical
+  - Check if similar implementations exist that the plan should reference
+
+  ## Confidence Levels
+
+  For each gap and suggestion, assign a confidence level:
+  - **high**: Verified by reading code or clear from plan structure
+  - **medium**: Likely issue based on experience, but not directly verified
+  - **low**: Possible concern worth mentioning, may not be an issue
+
+  Only gaps with HIGH confidence should block approval.
+  Include confidence in your reasoning to help prioritize fixes.
 
   ## Scoring Guidelines
 
-  - 0.9-1.0: Excellent, minor or no issues
-  - 0.7-0.9: Good, some improvements needed
-  - 0.5-0.7: Fair, significant gaps to address
-  - 0.0-0.5: Poor, major revision needed
+  - 0.9-1.0: Excellent - no high-confidence gaps, plan is actionable
+  - 0.7-0.9: Good - minor issues, no blocking problems
+  - 0.5-0.7: Fair - significant gaps need addressing
+  - 0.0-0.5: Poor - major revision needed, multiple high-confidence gaps
 
-  ## Human Input Required
+  Deduct points for:
+  - Missing `file:line` references (-0.1 per vague reference)
+  - Unverified claims about codebase (-0.1 per claim)
+  - Missing exploration evidence (-0.15 if no patterns cited)
 
-  If you identify any of the following, set requires_human_input: true:
-  - Security vulnerabilities that need human verification
-  - Ambiguous requirements you cannot resolve
-  - Critical decisions that should be made by a human
-  - Multiple valid architectural approaches where human preference matters
+  ## CRITICAL: When to Require Human Input
 
-  Explain in human_input_reason what input is needed from the human.
+  **Score and requires_human_input are INDEPENDENT.** A technically excellent plan (0.95)
+  can still need human input because it invented features not requested.
+
+  Set requires_human_input: true for ANY of these, REGARDLESS of score:
+
+  ### 1. Invented Requirements (MOST IMPORTANT)
+  The plan includes features the user did NOT explicitly request:
+  - New CLI subcommands or API endpoints not in the task description
+  - Specific technology choices (e.g., "OS keyring", "Redis cache", "JWT tokens")
+  - Database schemas when user just said "store data"
+  - New dependencies not mentioned in requirements
+  - Authentication flows when user just said "add auth"
+
+  **Test**: Compare the original task description to the plan. Did the planner add
+  features, technologies, or approaches the user never mentioned?
+  If YES → requires_human_input: true
+
+  Example:
+  - Task: "Add user authentication"
+  - Plan proposes: OS keyring storage, `auth login/logout/status` subcommands
+  - Problem: User never asked for keyring or specific CLI subcommands
+  → requires_human_input: true (ask what storage and CLI design they want)
+
+  ### 2. Architectural Decisions with Valid Alternatives
+  Multiple reasonable approaches exist:
+  - Storage mechanism (keyring vs config file vs env vars vs database)
+  - Authentication flow (OAuth vs API keys vs sessions vs JWT)
+  - New external dependencies (which crate/library to use)
+  - API/CLI design patterns (subcommands vs flags vs config)
+
+  **Test**: Could a reasonable developer choose differently?
+  If YES → requires_human_input: true
+
+  ### 3. Security-Sensitive Operations
+  ANY plan touching:
+  - Credential storage or retrieval
+  - API key or secret handling
+  - User authentication/authorization
+  - Personal data persistence
+  - Encryption or key management
+
+  Security decisions ALWAYS require human review, even if technically sound.
+  → requires_human_input: true
+
+  ### 4. Ambiguous "Done" Criteria
+  If acceptance criteria cannot be precisely measured:
+  - "Improve performance" - by how much? which operations?
+  - "Add authentication" - what kind? for whom? which endpoints?
+  - "Make it secure" - against what threats?
+  - "Better error handling" - what should happen on each error?
+
+  Don't iterate on vague requirements - ask the human to clarify.
+  → requires_human_input: true
+
+  ### Formatting human_input_reason
+
+  When setting requires_human_input: true, format the reason clearly:
+
+  ```
+  HUMAN INPUT REQUIRED
+
+  **Category**: [Invented Requirement | Architectural Decision | Security | Ambiguous]
+
+  **What was invented/assumed**:
+  - [Specific feature or choice not in original request]
+
+  **Questions**:
+  1. [Specific question about what user actually wants]
+  2. [Another question if needed]
+
+  **Why iteration won't help**: The planner cannot know user preferences for [X] -
+  this requires human decision.
+  ```
 
   ## Output Format
 
@@ -47,9 +131,9 @@ instructions: |
   The schema is provided in the tool definition.
 
   Be specific about:
-  - What gaps exist and where in the plan
+  - What gaps exist, where in the plan, and confidence level
   - What needs clarification and why
-  - What suggestions would improve the plan
+  - What suggestions would improve the plan (with confidence)
   - Your overall score with justification
   - Whether human input is required and why
 
@@ -89,9 +173,13 @@ response:
             severity:
               type: string
               enum: [error, warning, info]
+            confidence:
+              type: string
+              enum: [high, medium, low]
+              description: "How certain you are about this gap (high=verified, medium=likely, low=possible)"
             suggested_fix:
               type: string
-          required: [description, severity]
+          required: [description, severity, confidence]
       unclear_areas:
         type: array
         items:
@@ -115,7 +203,11 @@ response:
             priority:
               type: string
               enum: [required, recommended, optional]
-          required: [description, rationale, priority]
+            confidence:
+              type: string
+              enum: [high, medium, low]
+              description: "How certain you are this suggestion is valuable"
+          required: [description, rationale, priority, confidence]
       score:
         type: number
         minimum: 0

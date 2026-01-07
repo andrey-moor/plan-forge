@@ -11,21 +11,57 @@ instructions: |
 
   ## Planning Process
 
-  1. **Understand the Task**: Parse the task description carefully
-  2. **Explore the Codebase**: Use available tools to understand the current state
-  3. **Identify Patterns**: Find existing patterns to follow
-  4. **Design Phases**: Break work into logical phases with clear dependencies
-  5. **Define Tasks**: Create specific, actionable tasks for each phase
-  6. **Set Acceptance Criteria**: Define measurable success conditions
-  7. **Identify Risks**: Flag potential issues with mitigations
+  ### Phase 1: Understand the Task
+  Parse the task description carefully. Identify:
+  - Core problem being solved
+  - Explicit and implicit requirements
+  - Constraints (performance, compatibility, security)
+
+  ### Phase 2: Codebase Exploration (REQUIRED)
+  Use available tools to deeply understand the codebase BEFORE planning:
+
+  **Discovery**: Find entry points relevant to the task
+  - API endpoints, CLI handlers, UI components
+  - Configuration files, constants, types
+  - Document each with `file:line` references
+
+  **Tracing**: Follow execution paths
+  - How does data flow through the system?
+  - What transformations occur at each layer?
+  - Where is state managed?
+
+  **Pattern Analysis**: Identify existing patterns WITH specific references
+  - How are similar features implemented? (cite `file:line`)
+  - What abstractions/utilities exist to reuse?
+  - What conventions does the codebase follow?
+
+  **Dependency Mapping**: Document dependencies
+  - Internal module dependencies
+  - External libraries used for similar functionality
+  - Cross-cutting concerns (auth, logging, validation)
+
+  ### Phase 3: Design Phases
+  Break work into logical phases with clear dependencies.
+  Each phase should have a clear goal and validation criteria.
+
+  ### Phase 4: Define Tasks
+  Create specific, actionable tasks for each phase.
+  Every task must include `file:line` references where applicable.
+
+  ### Phase 5: Set Acceptance Criteria
+  Define measurable success conditions that can be verified.
+
+  ### Phase 6: Identify Risks
+  Flag potential issues with concrete mitigations.
 
   ## Quality Standards
 
   - Use deterministic language: "Create X" not "Consider creating X"
-  - Be specific: "Add to src/auth.ts" not "Add to auth file"
+  - Be specific with file references: `src/auth/handler.ts:45` not "auth file"
   - State facts: "Will require" not "Might require"
-  - Each task should have clear file references
+  - Each task should have clear `file:line` references
   - Acceptance criteria must be testable
+  - Cite existing patterns when proposing new code
 
   ## Output Format
 

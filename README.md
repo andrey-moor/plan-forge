@@ -9,6 +9,7 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 
 - **Iterative Plan-Review Loop**: Generates plans, reviews them for gaps and clarity, and refines until quality threshold is met
 - **Multiple LLM Providers**: Supports Anthropic, OpenAI, LiteLLM, and other providers via [goose](https://github.com/block/goose)
+- **MCP Server**: Expose planning tools to AI assistants (Claude Code, Cursor, VS Code)
 - **Customizable Recipes**: Configure prompts, models, and MCP server extensions via YAML files
 - **Structured Output**: Plans are validated against JSON schemas and exported as markdown
 - **Resume Workflow**: Pick up where you left off with feedback-driven refinement
@@ -86,12 +87,28 @@ cargo run -- run --task "your task" --verbose
 
 ### Environment Variables
 
-| Variable | Provider | Required |
-|----------|----------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic | Yes (if using Anthropic) |
-| `OPENAI_API_KEY` | OpenAI | Yes (if using OpenAI) |
-| `LITELLM_HOST` | LiteLLM | Yes (if using LiteLLM) |
-| `LITELLM_API_KEY` | LiteLLM | Yes (if using LiteLLM) |
+**API Keys** (required for your chosen provider):
+
+| Variable | Provider |
+|----------|----------|
+| `ANTHROPIC_API_KEY` | Anthropic |
+| `OPENAI_API_KEY` | OpenAI |
+| `LITELLM_HOST` | LiteLLM |
+| `LITELLM_API_KEY` | LiteLLM |
+
+**Plan-Forge Configuration** (optional overrides):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PLAN_FORGE_THRESHOLD` | Review pass threshold (0.0-1.0) | 0.8 |
+| `PLAN_FORGE_MAX_ITERATIONS` | Maximum planning iterations | 5 |
+| `PLAN_FORGE_PLANNER_PROVIDER` | Override planner provider | - |
+| `PLAN_FORGE_PLANNER_MODEL` | Override planner model | - |
+| `PLAN_FORGE_REVIEWER_PROVIDER` | Override reviewer provider | - |
+| `PLAN_FORGE_REVIEWER_MODEL` | Override reviewer model | - |
+| `PLAN_FORGE_RECIPE_DIR` | Directory to search for recipes | - |
+
+Environment variables override config file values but are themselves overridden by CLI arguments.
 
 ### Config File
 
@@ -114,13 +131,20 @@ loop_config:
   early_exit_on_perfect_score: true
 
 output:
-  runs_dir: ./runs           # Intermediate JSON files
+  runs_dir: ./.plan-forge    # Session JSON files
   active_dir: ./dev/active   # Final markdown output
 ```
 
 ### Recipe Customization
 
-Recipes define LLM agent behavior. Located in `recipes/`:
+Recipes define LLM agent behavior. To customize, place recipe files in `.plan-forge/recipes/`:
+
+**Recipe resolution priority:**
+1. Explicit path in config (if it exists)
+2. Project-local `.plan-forge/recipes/planner.yaml` or `.plan-forge/recipes/reviewer.yaml`
+3. Bundled defaults (no external files required)
+
+**Recipe format:**
 
 ```yaml
 version: "1.0.0"
@@ -315,9 +339,9 @@ Task Description
 
 ### Output Structure
 
-**Intermediate files** (JSON, not committed):
+**Session files** (JSON, in `.plan-forge/`):
 ```
-~/.config/plan-forge/runs/<task-slug>/
+.plan-forge/<task-slug>/
 ├── plan-iteration-1.json
 ├── plan-iteration-2.json
 ├── review-iteration-1.json
@@ -331,6 +355,69 @@ Task Description
 ├── <task-slug>-tasks.md     # Detailed task breakdown
 └── <task-slug>-context.md   # Context for handoff
 ```
+
+## MCP Server
+
+Plan-forge can run as an MCP (Model Context Protocol) server, exposing planning tools to AI assistants like Claude Code, Cursor, and VS Code.
+
+### Running the MCP Server
+
+```bash
+# Run the plan-forge MCP server
+plan-forge mcp plan-forge
+
+# With custom config
+plan-forge mcp plan-forge --config ./config/default.yaml
+
+# Or run the developer tools server (from goose)
+plan-forge mcp developer
+```
+
+The MCP server automatically:
+- Detects config (in priority order):
+  1. `.plan-forge/config.yaml` (recommended)
+  2. `plan-forge.yaml`
+  3. `.plan-forge.yaml`
+  4. `config/default.yaml`
+- Applies `PLAN_FORGE_*` environment variable overrides
+- Bundles default recipes (no external recipe files required)
+
+### Configuring with Claude Code
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "plan-forge": {
+      "command": "plan-forge",
+      "args": ["mcp", "plan-forge"]
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `plan_run` | Create or resume a planning session |
+| `plan_status` | Get session status (ready/in_progress/needs_input/approved/max_turns) |
+| `plan_list` | List all planning sessions |
+| `plan_get` | Read plan, tasks, or context markdown files |
+| `plan_approve` | Force approve a plan and write to dev/active/ |
+
+### Session Status
+
+| Status | Meaning |
+|--------|---------|
+| `ready` | Session created but no planning started |
+| `in_progress` | Planning loop is running |
+| `needs_input` | Reviewer flagged need for human input |
+| `approved` | Plan passed review (score >= threshold) |
+| `max_turns` | Max iterations reached without approval |
+
+See [integrations/claude-code/README.md](integrations/claude-code/README.md) for detailed integration instructions.
 
 ## Development
 

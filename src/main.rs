@@ -6,31 +6,55 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use plan_forge::{
     slugify, CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, Plan,
-    ResumeState,
+    PlanForgeServer, ResumeState,
 };
 
 // Re-export MCP server types from goose-mcp
-use goose_mcp::mcp_server_runner::{serve, McpCommand};
+use goose_mcp::mcp_server_runner::serve;
 use goose_mcp::DeveloperServer;
+
+/// MCP server variants available in plan-forge
+#[derive(Clone, Debug)]
+pub enum McpServer {
+    /// Developer tools server (from goose)
+    Developer,
+    /// Plan-forge planning server
+    PlanForge,
+}
+
+impl std::str::FromStr for McpServer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace([' ', '-'], "").as_str() {
+            "developer" => Ok(McpServer::Developer),
+            "planforge" => Ok(McpServer::PlanForge),
+            _ => Err(format!(
+                "Invalid MCP server: '{}'. Available: developer, plan-forge",
+                s
+            )),
+        }
+    }
+}
 
 /// Set up isolated configuration directory for plan-forge.
 /// This prevents interference from global goose configuration.
+/// Uses .plan-forge/.goose/ in the current working directory.
 fn setup_isolated_config() {
     // Only set if not already set (allows override for testing)
     if std::env::var("GOOSE_PATH_ROOT").is_err() {
-        // Use app-specific directory under user's config
-        let config_base = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("plan-forge");
+        // Use .plan-forge/.goose/ in current working directory for project-local isolation
+        let goose_base = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".plan-forge/.goose");
 
         // Create directories if they don't exist (including subdirs goose expects)
-        let _ = std::fs::create_dir_all(config_base.join("config"));
-        let _ = std::fs::create_dir_all(config_base.join("data/sessions"));
-        let _ = std::fs::create_dir_all(config_base.join("state/logs"));
-        let _ = std::fs::create_dir_all(config_base.join("runs"));
+        let _ = std::fs::create_dir_all(goose_base.join("config"));
+        let _ = std::fs::create_dir_all(goose_base.join("data/sessions"));
+        let _ = std::fs::create_dir_all(goose_base.join("state/logs"));
 
         // Create minimal goose config to suppress "extensions not found" warning
-        let config_file = config_base.join("config/config.yaml");
+        let config_file = goose_base.join("config/config.yaml");
         if !config_file.exists() {
             let _ = std::fs::write(&config_file, "extensions: {}\n");
         }
@@ -38,7 +62,7 @@ fn setup_isolated_config() {
         // SAFETY: This is called early in main() before spawning any threads,
         // and before any goose code runs, so it's safe to modify env vars.
         unsafe {
-            std::env::set_var("GOOSE_PATH_ROOT", &config_base);
+            std::env::set_var("GOOSE_PATH_ROOT", &goose_base);
         }
     }
 }
@@ -61,11 +85,15 @@ enum Command {
         args: RunArgs,
     },
 
-    /// Run an MCP server (for builtin extensions)
+    /// Run an MCP server (developer or plan-forge)
     #[command(name = "mcp")]
     Mcp {
-        #[arg(value_parser = clap::value_parser!(McpCommand))]
-        server: McpCommand,
+        #[arg(value_parser = clap::value_parser!(McpServer))]
+        server: McpServer,
+
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -130,7 +158,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Mcp { server }) => handle_mcp_command(server).await,
+        Some(Command::Mcp { server, config }) => handle_mcp_command(server, config).await,
         Some(Command::Run { args }) => handle_run_command(args).await,
         None => {
             // Default behavior: show help
@@ -141,15 +169,21 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_mcp_command(server: McpCommand) -> Result<()> {
+async fn handle_mcp_command(server: McpServer, config_path: Option<PathBuf>) -> Result<()> {
     // MCP servers should run with minimal logging to stderr
     // since they communicate via stdio
     match server {
-        McpCommand::Developer => serve(DeveloperServer::new()).await?,
-        // For now, only developer is needed. Other servers can be added later.
-        other => {
-            eprintln!("MCP server {:?} not yet supported", other);
-            std::process::exit(1);
+        McpServer::Developer => serve(DeveloperServer::new()).await?,
+        McpServer::PlanForge => {
+            // Load config with env overrides if path provided
+            let plan_forge_server = if let Some(path) = config_path {
+                let config = CliConfig::load_with_env(Some(&path))?;
+                PlanForgeServer::with_config(config)
+            } else {
+                // Auto-detect config and apply env overrides
+                PlanForgeServer::new()
+            };
+            serve(plan_forge_server).await?
         }
     }
     Ok(())
@@ -221,10 +255,10 @@ fn resolve_input(args: &RunArgs) -> Result<(String, String, Option<ResumeState>)
                 .map(String::from)
                 .ok_or_else(|| anyhow::anyhow!("Invalid directory name: {:?}", path))?;
 
-            // Find runs directory and load plan
-            let runs_dir = dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("plan-forge/runs")
+            // Find runs directory and load plan from .plan-forge/<slug>/
+            let runs_dir = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".plan-forge")
                 .join(&slug);
 
             let (plan, iteration) = load_latest_plan(&runs_dir)?;
@@ -285,7 +319,7 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     info!("Task slug: {}", task_slug);
 
     // Load configuration
-    let mut config = CliConfig::load_or_default(args.config.as_ref())?;
+    let mut config = CliConfig::load_with_env(args.config.as_ref())?;
 
     // Apply CLI overrides
     if let Some(model) = args.planner_model {
@@ -304,12 +338,14 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     config.review.pass_threshold = args.threshold;
 
     // Set up output directories using task slug
-    let runs_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("plan-forge/runs")
+    // Uses .plan-forge/<slug>/ in current working directory for project-local storage
+    let runs_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".plan-forge")
         .join(&task_slug);
     config.output.runs_dir = runs_dir.clone();
     config.output.active_dir = args.output;
+    config.output.slug = Some(task_slug.clone());
 
     // Create runs directory if it doesn't exist
     std::fs::create_dir_all(&runs_dir)?;

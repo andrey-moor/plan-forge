@@ -14,5 +14,5 @@ loop_config:
   early_exit_on_perfect_score: true
 
 output:
-  runs_dir: ./runs
+  runs_dir: ./.plan-forge
   active_dir: ./dev/active

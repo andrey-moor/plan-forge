@@ -14,6 +14,7 @@ use goose::session::{session_manager::SessionType, SessionManager};
 use crate::config::{HardChecklist, ReviewConfig};
 use crate::models::{LlmReview, Plan, ReviewResult};
 use crate::orchestrator::LoopState;
+use crate::recipes::load_recipe;
 
 use super::Reviewer;
 
@@ -55,10 +56,8 @@ impl GooseReviewer {
     }
 
     async fn run_llm_review(&self, plan: &Plan, state: &LoopState) -> Result<LlmReview> {
-        // Load recipe
-        let recipe_path = self.base_dir.join(&self.config.recipe);
-        let recipe = Recipe::from_file_path(&recipe_path)
-            .context(format!("Failed to load reviewer recipe from {:?}", recipe_path))?;
+        // Load recipe (with fallback to bundled default)
+        let recipe = load_recipe(&self.config.recipe, &self.base_dir, "reviewer")?;
 
         // Create provider
         let provider = self.create_provider(&recipe).await?;

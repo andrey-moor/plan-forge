@@ -19,8 +19,8 @@ Thumbs.db
 # Logs
 *.log
 
-# Local development
-/runs/
+# Local development - plan-forge session data
+.plan-forge/.goose/
 
 # Temporary files
 *.tmp
