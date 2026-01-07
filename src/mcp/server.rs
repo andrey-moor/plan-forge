@@ -450,16 +450,26 @@ impl PlanForgeServer {
                 .ok();
 
                 // If current session is in a resumable state, resume it
-                if let Some(info) = info
-                    && matches!(
-                        info.status,
+                if let Some(info) = info {
+                    match info.status {
+                        // Ready = just created, no plan files yet (retry while first call in progress)
+                        // Just reuse the session_id, don't try to load resume state
+                        SessionStatus::Ready => {
+                            self.set_current_session(sid.clone());
+                            return self.run_loop(sid, task, None, false).await;
+                        }
+                        // Has plan files, can resume with existing state
                         SessionStatus::NeedsInput
-                            | SessionStatus::MaxTurns
-                            | SessionStatus::InProgress
-                    )
-                {
-                    let resume = self.load_resume_state(&session_dir, &task, reset_turns)?;
-                    return self.run_loop(sid, task, Some(resume), false).await;
+                        | SessionStatus::MaxTurns
+                        | SessionStatus::InProgress => {
+                            let resume =
+                                self.load_resume_state(&session_dir, &task, reset_turns)?;
+                            self.set_current_session(sid.clone());
+                            return self.run_loop(sid, task, Some(resume), false).await;
+                        }
+                        // Approved = completed, fall through to create new session
+                        SessionStatus::Approved => {}
+                    }
                 }
             }
 
@@ -469,6 +479,8 @@ impl PlanForgeServer {
             (slug, None, true)
         };
 
+        // Set current session BEFORE run_loop to prevent duplicate directories on retries
+        self.set_current_session(task_slug.clone());
         self.run_loop(task_slug, task, resume_state, is_new_session)
             .await
     }
@@ -687,8 +699,8 @@ impl PlanForgeServer {
         resume_state: Option<ResumeState>,
         is_new_session: bool,
     ) -> Result<CallToolResult, ErrorData> {
-        // Set as current session
-        self.set_current_session(task_slug.clone());
+        // Note: current_session is set by caller (plan_run) BEFORE calling run_loop
+        // to prevent duplicate directories when agent retries without session_id
 
         // Create session directory
         let session_dir = self.session_dir(&task_slug);
