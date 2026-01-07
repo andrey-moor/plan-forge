@@ -55,6 +55,19 @@ plan-forge mcp developer
 
 Available tools via MCP: `plan_run`, `plan_status`, `plan_list`, `plan_get`, `plan_approve`
 
+**Using LiteLLM with MCP server:**
+
+```bash
+export LITELLM_HOST=http://localhost:4000
+export LITELLM_API_KEY=sk-xxx
+export PLAN_FORGE_PLANNER_PROVIDER=litellm
+export PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5
+export PLAN_FORGE_REVIEWER_PROVIDER=litellm
+export PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5
+
+plan-forge mcp plan-forge
+```
+
 ## Architecture
 
 This is a Rust CLI tool that uses the `goose` crate to run an iterative plan-review feedback loop. It generates development plans using an LLM, reviews them, and refines based on feedback.

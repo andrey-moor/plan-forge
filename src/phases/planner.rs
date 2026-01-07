@@ -9,7 +9,7 @@ use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::Message;
 use goose::providers::{base::Provider, create_with_named_model};
 use goose::recipe::Recipe;
-use goose::session::{session_manager::SessionType, SessionManager};
+use goose::session::{SessionManager, session_manager::SessionType};
 
 use crate::config::PlanningConfig;
 use crate::models::Plan;
@@ -35,17 +35,26 @@ impl GoosePlanner {
             .config
             .provider_override
             .as_deref()
-            .or(recipe.settings.as_ref().and_then(|s| s.goose_provider.as_deref()))
+            .or(recipe
+                .settings
+                .as_ref()
+                .and_then(|s| s.goose_provider.as_deref()))
             .unwrap_or("anthropic");
 
         let model_name = self
             .config
             .model_override
             .as_deref()
-            .or(recipe.settings.as_ref().and_then(|s| s.goose_model.as_deref()))
+            .or(recipe
+                .settings
+                .as_ref()
+                .and_then(|s| s.goose_model.as_deref()))
             .unwrap_or("claude-opus-4-5-20251101");
 
-        info!("Creating provider: {} with model: {}", provider_name, model_name);
+        info!(
+            "Creating provider: {} with model: {}",
+            provider_name, model_name
+        );
         create_with_named_model(provider_name, model_name)
             .await
             .context("Failed to create provider")
@@ -290,10 +299,10 @@ fn extract_json_block(text: &str) -> Option<&str> {
     }
 
     // Try finding raw JSON object
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return Some(&text[start..=end]);
-        }
+    if let Some(start) = text.find('{')
+        && let Some(end) = text.rfind('}')
+    {
+        return Some(&text[start..=end]);
     }
 
     None

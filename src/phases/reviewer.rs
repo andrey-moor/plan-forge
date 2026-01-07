@@ -9,7 +9,7 @@ use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::Message;
 use goose::providers::{base::Provider, create_with_named_model};
 use goose::recipe::Recipe;
-use goose::session::{session_manager::SessionType, SessionManager};
+use goose::session::{SessionManager, session_manager::SessionType};
 
 use crate::config::{HardChecklist, ReviewConfig};
 use crate::models::{LlmReview, Plan, ReviewResult};
@@ -39,17 +39,26 @@ impl GooseReviewer {
             .config
             .provider_override
             .as_deref()
-            .or(recipe.settings.as_ref().and_then(|s| s.goose_provider.as_deref()))
+            .or(recipe
+                .settings
+                .as_ref()
+                .and_then(|s| s.goose_provider.as_deref()))
             .unwrap_or("anthropic");
 
         let model_name = self
             .config
             .model_override
             .as_deref()
-            .or(recipe.settings.as_ref().and_then(|s| s.goose_model.as_deref()))
+            .or(recipe
+                .settings
+                .as_ref()
+                .and_then(|s| s.goose_model.as_deref()))
             .unwrap_or("claude-opus-4-5-20251101");
 
-        info!("Creating reviewer provider: {} with model: {}", provider_name, model_name);
+        info!(
+            "Creating reviewer provider: {} with model: {}",
+            provider_name, model_name
+        );
         create_with_named_model(provider_name, model_name)
             .await
             .context("Failed to create reviewer provider")
@@ -236,8 +245,7 @@ impl Reviewer for GooseReviewer {
         info!("LLM review score: {:.2}", llm_review.score);
 
         // Calculate if passed
-        let passed =
-            hard_failures.is_empty() && llm_review.score >= self.config.pass_threshold;
+        let passed = hard_failures.is_empty() && llm_review.score >= self.config.pass_threshold;
 
         let summary = if passed {
             format!(
@@ -293,10 +301,10 @@ fn extract_json_block(text: &str) -> Option<&str> {
         }
     }
 
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return Some(&text[start..=end]);
-        }
+    if let Some(start) = text.find('{')
+        && let Some(end) = text.rfind('}')
+    {
+        return Some(&text[start..=end]);
     }
 
     None

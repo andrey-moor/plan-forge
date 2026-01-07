@@ -1,5 +1,5 @@
-pub mod settings;
 pub mod checklist;
+pub mod settings;
 
-pub use settings::*;
 pub use checklist::*;
+pub use settings::*;

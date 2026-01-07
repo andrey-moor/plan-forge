@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use plan_forge::{
-    slugify, CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, Plan,
-    PlanForgeServer, ResumeState,
+    CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, Plan,
+    PlanForgeServer, ResumeState, slugify,
 };
 
 // Re-export MCP server types from goose-mcp
-use goose_mcp::mcp_server_runner::serve;
 use goose_mcp::DeveloperServer;
+use goose_mcp::mcp_server_runner::serve;
 
 /// MCP server variants available in plan-forge
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ enum Command {
     #[command(name = "run")]
     Run {
         #[command(flatten)]
-        args: RunArgs,
+        args: Box<RunArgs>,
     },
 
     /// Run an MCP server (developer or plan-forge)
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Mcp { server, config }) => handle_mcp_command(server, config).await,
-        Some(Command::Run { args }) => handle_run_command(args).await,
+        Some(Command::Run { args }) => handle_run_command(*args).await,
         None => {
             // Default behavior: show help
             eprintln!("No command specified. Use --help for usage information.");
@@ -205,18 +205,16 @@ fn load_latest_plan(runs_dir: &PathBuf) -> Result<(Plan, u32)> {
         if let Some(iter_str) = filename_str
             .strip_prefix("plan-iteration-")
             .and_then(|s| s.strip_suffix(".json"))
+            && let Ok(iter) = iter_str.parse::<u32>()
+            && iter > highest_iteration
         {
-            if let Ok(iter) = iter_str.parse::<u32>() {
-                if iter > highest_iteration {
-                    highest_iteration = iter;
-                    latest_plan_path = Some(entry.path());
-                }
-            }
+            highest_iteration = iter;
+            latest_plan_path = Some(entry.path());
         }
     }
 
-    let plan_path = latest_plan_path
-        .ok_or_else(|| anyhow::anyhow!("No plan files found in {:?}", runs_dir))?;
+    let plan_path =
+        latest_plan_path.ok_or_else(|| anyhow::anyhow!("No plan files found in {:?}", runs_dir))?;
 
     let plan_json = std::fs::read_to_string(&plan_path)
         .context(format!("Failed to read plan file: {:?}", plan_path))?;
@@ -224,7 +222,10 @@ fn load_latest_plan(runs_dir: &PathBuf) -> Result<(Plan, u32)> {
     let plan: Plan = serde_json::from_str(&plan_json)
         .context(format!("Failed to parse plan JSON from {:?}", plan_path))?;
 
-    info!("Loaded plan from {:?} (iteration {})", plan_path, highest_iteration);
+    info!(
+        "Loaded plan from {:?} (iteration {})",
+        plan_path, highest_iteration
+    );
     Ok((plan, highest_iteration))
 }
 
@@ -233,8 +234,8 @@ fn resolve_input(args: &RunArgs) -> Result<(String, String, Option<ResumeState>)
     match &args.path {
         Some(path) if path.is_file() => {
             // Read task from file
-            let file_content = std::fs::read_to_string(path)
-                .context(format!("Failed to read: {:?}", path))?;
+            let file_content =
+                std::fs::read_to_string(path).context(format!("Failed to read: {:?}", path))?;
 
             // Combine with --task if provided (as additional context)
             let task = match &args.task {
@@ -364,8 +365,8 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     let output = FileOutputWriter::new(config.output.clone());
 
     // Create loop controller
-    let mut controller = LoopController::new(planner, reviewer, output, config)
-        .with_task_slug(task_slug.clone());
+    let mut controller =
+        LoopController::new(planner, reviewer, output, config).with_task_slug(task_slug.clone());
 
     // Apply resume state if present
     if let Some(resume) = resume_state {
@@ -388,13 +389,23 @@ fn print_result(result: plan_forge::LoopResult) -> Result<()> {
     println!("Plan-Review Complete!");
     println!("========================================");
     println!("Total iterations: {}", result.total_iterations);
-    println!("Final status: {}", if result.success { "PASSED" } else { "NEEDS REVISION" });
+    println!(
+        "Final status: {}",
+        if result.success {
+            "PASSED"
+        } else {
+            "NEEDS REVISION"
+        }
+    );
     println!("Final score: {:.2}", result.final_review.llm_review.score);
     println!("Plan title: {}", result.final_plan.title);
     println!("\nReview summary: {}", result.final_review.summary);
 
     if !result.success {
-        println!("\n⚠️  Plan did not pass review after {} iterations", result.total_iterations);
+        println!(
+            "\n⚠️  Plan did not pass review after {} iterations",
+            result.total_iterations
+        );
         println!("Review the output files for details on remaining issues.");
         std::process::exit(1);
     }

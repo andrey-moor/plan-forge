@@ -79,7 +79,10 @@ impl ReviewResult {
                     Severity::Warning => "[SHOULD FIX]",
                     Severity::Info => "[CONSIDER]",
                 };
-                feedback.push(format!("{} {}: {}", prefix, check.check_name, check.message));
+                feedback.push(format!(
+                    "{} {}: {}",
+                    prefix, check.check_name, check.message
+                ));
             }
         }
 

@@ -34,9 +34,8 @@ impl RecipeSource {
     /// Load a Recipe from this source
     pub fn load_recipe(&self) -> Result<Recipe> {
         match self {
-            RecipeSource::File(path) => {
-                Recipe::from_file_path(path).context(format!("Failed to load recipe from {:?}", path))
-            }
+            RecipeSource::File(path) => Recipe::from_file_path(path)
+                .context(format!("Failed to load recipe from {:?}", path)),
             RecipeSource::Bundled(content) => {
                 // Recipe implements Deserialize, so we can parse directly from YAML
                 serde_yaml::from_str(content).context("Failed to parse bundled recipe")
@@ -56,11 +55,7 @@ impl RecipeSource {
 /// * `recipe_path` - Configured recipe path (may be relative)
 /// * `base_dir` - Base directory to resolve relative paths from
 /// * `recipe_name` - Recipe name for lookup (e.g., "planner", "reviewer")
-pub fn resolve_recipe(
-    recipe_path: &Path,
-    base_dir: &Path,
-    recipe_name: &str,
-) -> RecipeSource {
+pub fn resolve_recipe(recipe_path: &Path, base_dir: &Path, recipe_name: &str) -> RecipeSource {
     // 1. Try explicit path
     let explicit_path = if recipe_path.is_absolute() {
         recipe_path.to_path_buf()
@@ -98,11 +93,7 @@ pub fn resolve_recipe(
 /// Convenience function to resolve and load a recipe.
 ///
 /// This combines resolution and loading in one step.
-pub fn load_recipe(
-    recipe_path: &Path,
-    base_dir: &Path,
-    recipe_name: &str,
-) -> Result<Recipe> {
+pub fn load_recipe(recipe_path: &Path, base_dir: &Path, recipe_name: &str) -> Result<Recipe> {
     let source = resolve_recipe(recipe_path, base_dir, recipe_name);
     source.load_recipe()
 }
@@ -120,10 +111,10 @@ mod tests {
     #[test]
     fn test_bundled_recipes_valid_yaml() {
         // Just check they parse as YAML
-        let _: serde_yaml::Value =
-            serde_yaml::from_str(DEFAULT_PLANNER_RECIPE).expect("planner recipe should be valid YAML");
-        let _: serde_yaml::Value =
-            serde_yaml::from_str(DEFAULT_REVIEWER_RECIPE).expect("reviewer recipe should be valid YAML");
+        let _: serde_yaml::Value = serde_yaml::from_str(DEFAULT_PLANNER_RECIPE)
+            .expect("planner recipe should be valid YAML");
+        let _: serde_yaml::Value = serde_yaml::from_str(DEFAULT_REVIEWER_RECIPE)
+            .expect("reviewer recipe should be valid YAML");
     }
 
     #[test]

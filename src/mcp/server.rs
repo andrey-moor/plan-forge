@@ -3,10 +3,14 @@
 //! Exposes planning tools to AI assistants via MCP protocol.
 
 use rmcp::{
+    ServerHandler,
     handler::server::router::tool::ToolRouter,
-    model::{CallToolResult, Content, ErrorCode, ErrorData, Implementation, Role, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, ErrorCode, ErrorData, Implementation, Role, ServerCapabilities,
+        ServerInfo,
+    },
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,11 +19,11 @@ use std::{
 };
 
 use crate::{
-    generate_slug, slugify, CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer,
-    LoopController, OutputConfig, OutputWriter, Plan, ResumeState,
+    CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, OutputConfig,
+    OutputWriter, Plan, ResumeState, generate_slug, slugify,
 };
 
-use super::status::{derive_status, list_sessions, SessionInfo, SessionStatus};
+use super::status::{SessionInfo, SessionStatus, derive_status, list_sessions};
 
 // ============================================================================
 // Session Metadata
@@ -284,8 +288,9 @@ impl PlanForgeServer {
             )
         })?;
 
-        Ok(CallToolResult::success(vec![Content::text(response)
-            .with_audience(vec![Role::Assistant])]))
+        Ok(CallToolResult::success(vec![
+            Content::text(response).with_audience(vec![Role::Assistant]),
+        ]))
     }
 
     /// List all planning sessions.
@@ -331,8 +336,9 @@ impl PlanForgeServer {
             )
         })?;
 
-        Ok(CallToolResult::success(vec![Content::text(response)
-            .with_audience(vec![Role::Assistant])]))
+        Ok(CallToolResult::success(vec![
+            Content::text(response).with_audience(vec![Role::Assistant]),
+        ]))
     }
 
     /// Read plan content from dev/active/ directory.
@@ -376,11 +382,7 @@ impl PlanForgeServer {
         };
 
         // Files are in dev/active/<slug>/<slug>-<type>.md
-        let file_path = self
-            .base_dir
-            .join("dev/active")
-            .join(&slug)
-            .join(&filename);
+        let file_path = self.base_dir.join("dev/active").join(&slug).join(&filename);
 
         let content = std::fs::read_to_string(&file_path).map_err(|e| {
             ErrorData::new(
@@ -390,8 +392,9 @@ impl PlanForgeServer {
             )
         })?;
 
-        Ok(CallToolResult::success(vec![Content::text(content)
-            .with_audience(vec![Role::Assistant])]))
+        Ok(CallToolResult::success(vec![
+            Content::text(content).with_audience(vec![Role::Assistant]),
+        ]))
     }
 
     // ========================================================================
@@ -450,7 +453,9 @@ impl PlanForgeServer {
                 if let Some(info) = info
                     && matches!(
                         info.status,
-                        SessionStatus::NeedsInput | SessionStatus::MaxTurns | SessionStatus::InProgress
+                        SessionStatus::NeedsInput
+                            | SessionStatus::MaxTurns
+                            | SessionStatus::InProgress
                     )
                 {
                     let resume = self.load_resume_state(&session_dir, &task, reset_turns)?;
@@ -464,7 +469,8 @@ impl PlanForgeServer {
             (slug, None, true)
         };
 
-        self.run_loop(task_slug, task, resume_state, is_new_session).await
+        self.run_loop(task_slug, task, resume_state, is_new_session)
+            .await
     }
 
     /// Force approve a session and write to dev/active/.
@@ -510,8 +516,9 @@ impl PlanForgeServer {
             plan.title, slug
         );
 
-        Ok(CallToolResult::success(vec![Content::text(response)
-            .with_audience(vec![Role::Assistant])]))
+        Ok(CallToolResult::success(vec![
+            Content::text(response).with_audience(vec![Role::Assistant]),
+        ]))
     }
 
     // ========================================================================
@@ -538,13 +545,11 @@ impl PlanForgeServer {
             if let Some(iter_str) = filename_str
                 .strip_prefix("plan-iteration-")
                 .and_then(|s| s.strip_suffix(".json"))
+                && let Ok(iter) = iter_str.parse::<u32>()
+                && iter > highest_iteration
             {
-                if let Ok(iter) = iter_str.parse::<u32>() {
-                    if iter > highest_iteration {
-                        highest_iteration = iter;
-                        latest_plan_path = Some(entry.path());
-                    }
-                }
+                highest_iteration = iter;
+                latest_plan_path = Some(entry.path());
             }
         }
 
@@ -592,15 +597,18 @@ impl PlanForgeServer {
                 if let Some(iter_str) = filename_str
                     .strip_prefix("plan-iteration-")
                     .and_then(|s| s.strip_suffix(".json"))
+                    && let Ok(iter) = iter_str.parse::<u32>()
                 {
-                    if let Ok(iter) = iter_str.parse::<u32>() {
-                        highest_iteration = highest_iteration.max(iter);
-                    }
+                    highest_iteration = highest_iteration.max(iter);
                 }
             }
         }
 
-        let start_iteration = if reset_turns { 1 } else { highest_iteration + 1 };
+        let start_iteration = if reset_turns {
+            1
+        } else {
+            highest_iteration + 1
+        };
 
         let feedback_items = if feedback.is_empty() {
             Vec::new()
@@ -616,7 +624,7 @@ impl PlanForgeServer {
     }
 
     /// Save session metadata to session directory
-    fn save_session_meta(&self, session_dir: &PathBuf, meta: &SessionMeta) -> Result<(), ErrorData> {
+    fn save_session_meta(&self, session_dir: &Path, meta: &SessionMeta) -> Result<(), ErrorData> {
         let meta_path = session_dir.join("session-meta.json");
         let json = serde_json::to_string_pretty(meta).map_err(|e| {
             ErrorData::new(
@@ -636,7 +644,7 @@ impl PlanForgeServer {
     }
 
     /// Load session metadata from session directory
-    fn load_session_meta(&self, session_dir: &PathBuf) -> Result<SessionMeta, ErrorData> {
+    fn load_session_meta(&self, session_dir: &Path) -> Result<SessionMeta, ErrorData> {
         let meta_path = session_dir.join("session-meta.json");
         let json = std::fs::read_to_string(&meta_path).map_err(|e| {
             ErrorData::new(
@@ -714,8 +722,8 @@ impl PlanForgeServer {
         let output = FileOutputWriter::new(config.output.clone());
 
         // Create loop controller
-        let mut controller =
-            LoopController::new(planner, reviewer, output, config).with_task_slug(task_slug.clone());
+        let mut controller = LoopController::new(planner, reviewer, output, config)
+            .with_task_slug(task_slug.clone());
 
         // Apply resume state if present
         if let Some(resume) = resume_state {
@@ -736,10 +744,10 @@ impl PlanForgeServer {
                     "summary": result.final_review.summary,
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&response).unwrap_or_default(),
-                )
-                .with_audience(vec![Role::Assistant])]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
+                        .with_audience(vec![Role::Assistant]),
+                ]))
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -761,10 +769,10 @@ impl PlanForgeServer {
                         "score": info.as_ref().and_then(|i| i.latest_score),
                     });
 
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        serde_json::to_string_pretty(&response).unwrap_or_default(),
-                    )
-                    .with_audience(vec![Role::Assistant])]));
+                    return Ok(CallToolResult::success(vec![
+                        Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
+                            .with_audience(vec![Role::Assistant]),
+                    ]));
                 }
 
                 Err(ErrorData::new(

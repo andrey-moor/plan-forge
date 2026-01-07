@@ -143,13 +143,11 @@ fn find_latest_plan(session_dir: &Path) -> anyhow::Result<(u32, Option<String>)>
         if let Some(iter_str) = filename_str
             .strip_prefix("plan-iteration-")
             .and_then(|s| s.strip_suffix(".json"))
+            && let Ok(iter) = iter_str.parse::<u32>()
+            && iter > highest_iteration
         {
-            if let Ok(iter) = iter_str.parse::<u32>() {
-                if iter > highest_iteration {
-                    highest_iteration = iter;
-                    latest_plan_path = Some(entry.path());
-                }
-            }
+            highest_iteration = iter;
+            latest_plan_path = Some(entry.path());
         }
     }
 
@@ -157,9 +155,7 @@ fn find_latest_plan(session_dir: &Path) -> anyhow::Result<(u32, Option<String>)>
     let title = if let Some(path) = latest_plan_path {
         let content = std::fs::read_to_string(&path)?;
         let plan: serde_json::Value = serde_json::from_str(&content)?;
-        plan.get("title")
-            .and_then(|v| v.as_str())
-            .map(String::from)
+        plan.get("title").and_then(|v| v.as_str()).map(String::from)
     } else {
         None
     };
@@ -184,13 +180,11 @@ fn find_latest_review(session_dir: &Path) -> anyhow::Result<(u32, Option<ReviewR
         if let Some(iter_str) = filename_str
             .strip_prefix("review-iteration-")
             .and_then(|s| s.strip_suffix(".json"))
+            && let Ok(iter) = iter_str.parse::<u32>()
+            && iter > highest_iteration
         {
-            if let Ok(iter) = iter_str.parse::<u32>() {
-                if iter > highest_iteration {
-                    highest_iteration = iter;
-                    latest_review_path = Some(entry.path());
-                }
-            }
+            highest_iteration = iter;
+            latest_review_path = Some(entry.path());
         }
     }
 
@@ -238,12 +232,8 @@ pub fn list_sessions(plan_forge_dir: &Path) -> anyhow::Result<Vec<String>> {
         let path_a = plan_forge_dir.join(a);
         let path_b = plan_forge_dir.join(b);
 
-        let mtime_a = std::fs::metadata(&path_a)
-            .and_then(|m| m.modified())
-            .ok();
-        let mtime_b = std::fs::metadata(&path_b)
-            .and_then(|m| m.modified())
-            .ok();
+        let mtime_a = std::fs::metadata(&path_a).and_then(|m| m.modified()).ok();
+        let mtime_b = std::fs::metadata(&path_b).and_then(|m| m.modified()).ok();
 
         mtime_b.cmp(&mtime_a)
     });

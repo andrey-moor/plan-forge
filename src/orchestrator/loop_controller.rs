@@ -61,15 +61,14 @@ where
 
     /// Run the complete feedback loop
     pub async fn run(&self, task: String, working_dir: Option<String>) -> Result<LoopResult> {
-        let mut state = LoopState::new(
-            task,
-            self.config.loop_config.max_iterations,
-            working_dir,
-        );
+        let mut state = LoopState::new(task, self.config.loop_config.max_iterations, working_dir);
 
         // Handle resume state if provided
         if let Some(resume) = &self.resume_state {
-            info!("Resuming from existing plan (iteration {})", resume.start_iteration);
+            info!(
+                "Resuming from existing plan (iteration {})",
+                resume.start_iteration
+            );
             state.iteration = resume.start_iteration.saturating_sub(1); // Will be incremented
             state.current_plan = Some(resume.plan.clone());
 
@@ -117,16 +116,20 @@ where
             state.review_history.push(review.clone());
 
             // Write review output
-            self.output
-                .write_review(&review, state.iteration)
-                .await?;
+            self.output.write_review(&review, state.iteration).await?;
 
             info!("Review summary: {}", review.summary);
 
             // Check if human input is required
             if review.llm_review.requires_human_input {
-                let task_slug = self.task_slug.clone().unwrap_or_else(|| "unknown".to_string());
-                let reason = review.llm_review.human_input_reason.clone()
+                let task_slug = self
+                    .task_slug
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let reason = review
+                    .llm_review
+                    .human_input_reason
+                    .clone()
                     .unwrap_or_else(|| "Human verification required".to_string());
 
                 warn!("Review requires human input: {}", reason);

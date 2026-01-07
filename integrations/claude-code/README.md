@@ -243,6 +243,31 @@ export LITELLM_HOST=http://localhost:4000
 export LITELLM_API_KEY=sk-your-key
 ```
 
+**Claude Code MCP integration with LiteLLM:**
+
+When configuring plan-forge as an MCP server in Claude Code, pass LiteLLM credentials via environment variables in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "plan-forge": {
+      "command": "plan-forge",
+      "args": ["mcp", "plan-forge"],
+      "env": {
+        "LITELLM_HOST": "http://localhost:4000",
+        "LITELLM_API_KEY": "sk-xxx",
+        "PLAN_FORGE_PLANNER_PROVIDER": "litellm",
+        "PLAN_FORGE_PLANNER_MODEL": "claude-opus-4.5",
+        "PLAN_FORGE_REVIEWER_PROVIDER": "litellm",
+        "PLAN_FORGE_REVIEWER_MODEL": "claude-opus-4.5"
+      }
+    }
+  }
+}
+```
+
+This passes the LiteLLM configuration to the MCP server process.
+
 ### Environment Variables
 
 Environment variables override config file values:

@@ -54,7 +54,10 @@ impl Default for HardChecklist {
 impl HardChecklist {
     /// Run all checks against a plan
     pub fn run_all(&self, plan: &Plan) -> Vec<HardCheckResult> {
-        self.checks.iter().map(|check| (check.validator)(plan)).collect()
+        self.checks
+            .iter()
+            .map(|check| (check.validator)(plan))
+            .collect()
     }
 }
 
@@ -64,7 +67,10 @@ fn check_has_acceptance_criteria(plan: &Plan) -> HardCheckResult {
         check_name: "has_acceptance_criteria".to_string(),
         passed,
         message: if passed {
-            format!("Found {} acceptance criteria", plan.acceptance_criteria.len())
+            format!(
+                "Found {} acceptance criteria",
+                plan.acceptance_criteria.len()
+            )
         } else {
             "Plan has no acceptance criteria defined".to_string()
         },
@@ -120,7 +126,10 @@ fn check_file_references_valid(plan: &Plan) -> HardCheckResult {
         check_name: "file_references_valid".to_string(),
         passed,
         message: if passed {
-            format!("All {} file references are valid", plan.file_references.len())
+            format!(
+                "All {} file references are valid",
+                plan.file_references.len()
+            )
         } else {
             format!("Invalid file references: {}", invalid.join(", "))
         },

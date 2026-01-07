@@ -36,19 +36,13 @@ impl FileOutputWriter {
 
         // Header
         md.push_str(&format!("# {}\n\n", plan.title));
-        md.push_str(&format!("**Status:** In Progress\n"));
-        md.push_str(&format!(
-            "**Created:** {}\n",
-            plan.metadata.created_at
-        ));
+        md.push_str("**Status:** In Progress\n");
+        md.push_str(&format!("**Created:** {}\n", plan.metadata.created_at));
         md.push_str(&format!(
             "**Last Updated:** {}\n",
             plan.metadata.last_updated
         ));
-        md.push_str(&format!(
-            "**Iteration:** {}\n\n",
-            plan.metadata.iteration
-        ));
+        md.push_str(&format!("**Iteration:** {}\n\n", plan.metadata.iteration));
 
         // Overview
         md.push_str("## Overview\n\n");
@@ -79,12 +73,7 @@ impl FileOutputWriter {
         // Phases
         md.push_str("## Phases\n\n");
         for (i, phase) in plan.phases.iter().enumerate() {
-            md.push_str(&format!(
-                "{}. **{}**: {}\n",
-                i + 1,
-                phase.name,
-                phase.goal
-            ));
+            md.push_str(&format!("{}. **{}**: {}\n", i + 1, phase.name, phase.goal));
         }
         md.push('\n');
 
@@ -179,9 +168,7 @@ impl FileOutputWriter {
         md.push_str(&format!("# {} - Context\n\n", plan.title));
 
         md.push_str("## Current State\n\n");
-        md.push_str(&format!(
-            "- **Working on**: Phase 1\n"
-        ));
+        md.push_str("- **Working on**: Phase 1\n");
         md.push_str(&format!(
             "- **Progress**: 0/{} tasks\n",
             plan.phases
@@ -284,7 +271,10 @@ impl OutputWriter for FileOutputWriter {
         info!("Wrote {:?}", context_path);
 
         // Write final JSON to runs_dir (service directory, not committed)
-        let json_path = self.config.runs_dir.join(format!("{}-final.json", task_name));
+        let json_path = self
+            .config
+            .runs_dir
+            .join(format!("{}-final.json", task_name));
         fs::write(&json_path, serde_json::to_string_pretty(plan)?).await?;
         info!("Wrote {:?}", json_path);
 

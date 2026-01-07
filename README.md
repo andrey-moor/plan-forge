@@ -274,6 +274,44 @@ settings:
 - `gpt-4o`, `gpt-4-turbo`
 - And other models supported by your Copilot subscription
 
+### Using LiteLLM with MCP Server
+
+When running plan-forge as an MCP server, configure LiteLLM via environment variables or config file.
+
+**Option 1: Environment variables**
+
+```bash
+export LITELLM_HOST=http://localhost:4000
+export LITELLM_API_KEY=sk-xxx
+export PLAN_FORGE_PLANNER_PROVIDER=litellm
+export PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5
+export PLAN_FORGE_REVIEWER_PROVIDER=litellm
+export PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5
+
+plan-forge mcp plan-forge
+```
+
+**Option 2: Config file** (`.plan-forge/config.yaml`)
+
+```yaml
+planning:
+  provider_override: litellm
+  model_override: claude-opus-4.5
+
+review:
+  provider_override: litellm
+  model_override: claude-opus-4.5
+```
+
+Then set only the LiteLLM connection variables:
+```bash
+export LITELLM_HOST=http://localhost:4000
+export LITELLM_API_KEY=sk-xxx
+plan-forge mcp plan-forge
+```
+
+**Note:** CLI arguments like `--planner-provider` only work with the `run` subcommand, not the MCP server.
+
 ## MCP Extensions
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers provide tools to the LLM agent.
