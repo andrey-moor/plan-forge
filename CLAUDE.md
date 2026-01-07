@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Quick reference for Claude Code when working with this repository. For detailed documentation, see [README.md](README.md).
 
 ## Build and Development Commands
 
@@ -39,27 +39,9 @@ cargo fmt
 cargo clippy
 ```
 
-### CLI Options
-
-- `--task, -t`: Task description (or feedback when used with --path <dir>)
-- `--path, -p`: Path to task file or existing plan directory
-  - If file: read task from file (--task becomes additional context)
-  - If directory: resume from plan (--task becomes feedback)
-- `--working-dir, -w`: Working directory for the planning task
-- `--config, -c`: Path to configuration file
-- `--planner-model`, `--reviewer-model`: Override LLM models
-- `--planner-provider`, `--reviewer-provider`: Override providers (e.g., "anthropic", "openai")
-- `--max-iterations`: Maximum iterations before giving up (default: 5)
-- `--output, -o`: Output directory for plan files (default: ./dev/active)
-- `--threshold`: Review pass threshold 0.0-1.0 (default: 0.8)
-
-### Output Structure
-
-- **Session files**: `.plan-forge/<task-slug>/` (JSON files, gitignore `.plan-forge/.goose/`)
-- **Final files**: `./dev/active/<task-slug>/` (markdown files, committed to repo)
-  - `<task-slug>-plan.md`: Overview and phases
-  - `<task-slug>-tasks.md`: Detailed task list
-  - `<task-slug>-context.md`: Context for handoff
+See [README.md#cli-options](README.md#cli-options) for full CLI reference. Key paths:
+- Session files: `.plan-forge/<task-slug>/`
+- Output files: `./dev/active/<task-slug>/`
 
 ### MCP Server
 
@@ -79,7 +61,7 @@ This is a Rust CLI tool that uses the `goose` crate to run an iterative plan-rev
 
 ### Core Flow
 
-```
+```text
 Task → Planner (LLM) → Plan → Reviewer (LLM) → ReviewResult
                          ↑                          ↓
                          └── Update with feedback ←─┘
@@ -91,27 +73,6 @@ The `LoopController` orchestrates this cycle until either:
 - Perfect score achieved (early exit if enabled)
 - Human input required (reviewer flags security concern or ambiguity)
 
-### Resume Workflow
-
-When a plan needs user input, or when you want to provide feedback after reviewing a generated plan:
-
-```bash
-# Initial run generates plan
-cargo run -- run --task "Add user authentication"
-
-# Plan is saved to dev/active/add-user-authentication/
-# Review the plan, then resume with feedback
-cargo run -- run --path dev/active/add-user-authentication/ \
-  --task "Use JWT tokens, not session cookies"
-```
-
-The `--path <directory>` feature:
-1. Derives task slug from directory name
-2. Loads latest plan from `.plan-forge/<task-slug>/`
-3. Treats `--task` as user feedback
-4. Planner updates the plan based on feedback
-5. Review loop continues until passing
-
 ### Key Components
 
 - **LoopController** (`src/orchestrator/loop_controller.rs`): Manages the plan-review-update loop, tracks state, handles iteration logic
@@ -122,11 +83,7 @@ The `--path <directory>` feature:
 
 ### Recipe System
 
-Recipes in `recipes/` define LLM agent behavior:
-- `planner.yaml`: Instructions for generating plans, uses goose extensions for codebase exploration
-- `reviewer.yaml`: Instructions for reviewing plans, scoring guidelines (0.9-1.0 excellent, 0.0-0.5 poor)
-
-Recipes specify provider/model defaults (anthropic/claude-opus-4-5-20251101) which can be overridden via CLI or config.
+Recipes (`planner.yaml`, `reviewer.yaml`) define LLM behavior. See [README.md#recipe-customization](README.md#recipe-customization).
 
 ### Configuration
 

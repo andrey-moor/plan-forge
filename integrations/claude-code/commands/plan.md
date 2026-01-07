@@ -49,8 +49,9 @@ When the user runs `/plan`, parse the arguments and execute accordingly:
 2. Confirm: "Plan approved and written to dev/active/<slug>/"
 
 ### `/plan resume <session_id> <feedback>`
-1. Call `plan_run(task=<feedback>, session_id=<id>)` via MCP
-2. Report the result or spawn background agent for longer operations
+1. Spawn the `plan-forge` agent with the Task tool using `run_in_background: true`
+2. Pass the feedback and session_id to resume the planning session
+3. Immediately respond: "Resuming planning session: <session_id>. Use `/plan status` to check progress."
 
 ## Examples
 

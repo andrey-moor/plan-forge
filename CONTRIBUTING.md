@@ -64,7 +64,7 @@ cargo run -- run --task "Test task" --max-iterations 1
 
 ### Project Structure
 
-```
+```text
 plan-forge/
 ├── src/
 │   ├── main.rs              # CLI entry point
@@ -126,7 +126,7 @@ cargo test -- --nocapture
 
 Use clear, descriptive commit messages:
 
-```
+```text
 type: short description
 
 Longer description if needed. Explain what and why,

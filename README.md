@@ -5,6 +5,21 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 [![CI](https://github.com/andrey-moor/plan-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/andrey-moor/plan-forge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Providers](#providers)
+- [MCP Extensions](#mcp-extensions)
+- [Architecture](#architecture)
+- [MCP Server](#mcp-server)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+- [Changelog](#changelog)
+
 ## Features
 
 - **Iterative Plan-Review Loop**: Generates plans, reviews them for gaps and clarity, and refines until quality threshold is met
@@ -67,6 +82,7 @@ cargo run -- run --task "your task" --verbose
 ```
 
 ### CLI Options
+<!-- Referenced by CLAUDE.md - do not remove without updating reference -->
 
 | Option | Short | Description |
 |--------|-------|-------------|
@@ -136,6 +152,7 @@ output:
 ```
 
 ### Recipe Customization
+<!-- Referenced by CLAUDE.md - do not remove without updating reference -->
 
 Recipes define LLM agent behavior. To customize, place recipe files in `.plan-forge/recipes/`:
 
@@ -301,7 +318,7 @@ See [MCP Servers](https://github.com/modelcontextprotocol/servers) for more opti
 
 ## Architecture
 
-```
+```text
 Task Description
        │
        ▼
@@ -340,7 +357,7 @@ Task Description
 ### Output Structure
 
 **Session files** (JSON, in `.plan-forge/`):
-```
+```text
 .plan-forge/<task-slug>/
 ├── plan-iteration-1.json
 ├── plan-iteration-2.json
@@ -349,7 +366,7 @@ Task Description
 ```
 
 **Final output** (Markdown, committed):
-```
+```text
 ./dev/active/<task-slug>/
 ├── <task-slug>-plan.md      # Overview, phases, risks
 ├── <task-slug>-tasks.md     # Detailed task breakdown
@@ -449,6 +466,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Acknowledgments
 
