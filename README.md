@@ -36,6 +36,21 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 - Rust 1.91+ (uses edition 2024)
 - An API key for your chosen LLM provider
 
+**Platform-specific requirements:**
+
+| Platform | Requirements |
+|----------|--------------|
+| **Linux** | System libraries (see below) |
+| **macOS** | No additional dependencies |
+| **Windows** | [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with "Desktop Development with C++" workload |
+
+**Linux** (Debian/Ubuntu):
+```bash
+sudo apt-get install libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libdbus-1-dev
+```
+
+**Windows**: For minimal install, select only MSVC v143 build tools + Windows 11 SDK
+
 ### Installation
 
 ```bash
@@ -53,8 +68,14 @@ cargo install --path .
 ### First Run
 
 ```bash
-# Set your API key
+# Set your API key (Linux/macOS)
 export ANTHROPIC_API_KEY="your-key-here"
+
+# Windows PowerShell
+$env:ANTHROPIC_API_KEY="your-key-here"
+
+# Windows cmd.exe
+set ANTHROPIC_API_KEY=your-key-here
 
 # Generate a plan
 cargo run -- run --task "Add user authentication to the web app"
