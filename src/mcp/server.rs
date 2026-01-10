@@ -18,9 +18,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[allow(deprecated)]
 use crate::{
-    CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, OutputConfig,
-    OutputWriter, Plan, ResumeState, generate_slug, slugify,
+    CliConfig, FileOutputWriter, GooseOrchestrator, GoosePlanner, GooseReviewer, HumanResponse,
+    LoopController, OutputConfig, OutputWriter, Plan, ResumeState, SessionRegistry, generate_slug,
+    slugify,
 };
 
 use super::status::{SessionInfo, SessionStatus, derive_status, list_sessions};
@@ -90,6 +92,21 @@ pub struct PlanRunParams {
     /// Reset turns counter when resuming (default: false)
     #[serde(default)]
     pub reset_turns: bool,
+    /// Use LLM-powered orchestrator instead of deterministic loop controller
+    #[serde(default)]
+    pub use_orchestrator: Option<bool>,
+    /// Human response for resuming paused orchestrator session
+    pub human_response: Option<HumanResponseParam>,
+}
+
+/// Human response parameters for resuming paused orchestrator sessions
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HumanResponseParam {
+    /// The response text
+    pub response: String,
+    /// Whether the human approves continuing
+    #[serde(default)]
+    pub approved: bool,
 }
 
 /// Parameters for the plan_approve tool
@@ -116,6 +133,8 @@ pub struct PlanForgeServer {
     config: Arc<CliConfig>,
     /// Base directory (where .plan-forge/ lives)
     base_dir: PathBuf,
+    /// Session registry for orchestrator mode (shared across sessions)
+    session_registry: Arc<SessionRegistry>,
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -179,6 +198,7 @@ impl PlanForgeServer {
             current_session: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             base_dir,
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 
@@ -192,6 +212,7 @@ impl PlanForgeServer {
             current_session: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             base_dir,
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 
@@ -419,7 +440,17 @@ impl PlanForgeServer {
         let task = params.0.task.clone();
         let session_id = params.0.session_id.clone();
         let reset_turns = params.0.reset_turns;
+        let use_orchestrator = params.0.use_orchestrator.unwrap_or(self.config.use_orchestrator);
+        let human_response = params.0.human_response;
 
+        // Check if orchestrator mode is enabled
+        if use_orchestrator {
+            return self
+                .run_orchestrator(task, session_id, human_response)
+                .await;
+        }
+
+        // Legacy loop controller mode
         // Determine if this is a new session or resume
         let (task_slug, resume_state, is_new_session) = if let Some(sid) = session_id {
             // Resume existing session
@@ -467,8 +498,17 @@ impl PlanForgeServer {
                             self.set_current_session(sid.clone());
                             return self.run_loop(sid, task, Some(resume), false).await;
                         }
+                        // Orchestrator states - must be resumed with orchestrator
+                        SessionStatus::GuardrailTriggered { .. }
+                        | SessionStatus::PausedForHumanInput { .. } => {
+                            // These are orchestrator sessions - route to run_orchestrator
+                            self.set_current_session(sid.clone());
+                            return self.run_orchestrator(task, Some(sid), human_response).await;
+                        }
                         // Approved = completed, fall through to create new session
                         SessionStatus::Approved => {}
+                        // HardStopped = cannot be resumed, fall through to create new session
+                        SessionStatus::HardStopped { .. } => {}
                     }
                 }
             }
@@ -691,7 +731,8 @@ impl PlanForgeServer {
         (provider, model)
     }
 
-    /// Run the planning loop
+    /// Run the planning loop (legacy mode)
+    #[allow(deprecated)]
     async fn run_loop(
         &self,
         task_slug: String,
@@ -793,6 +834,102 @@ impl PlanForgeServer {
                     None,
                 ))
             }
+        }
+    }
+
+    /// Run the orchestrator for a task (LLM-powered mode).
+    async fn run_orchestrator(
+        &self,
+        task: String,
+        session_id: Option<String>,
+        human_response: Option<HumanResponseParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Generate slug for new sessions or use provided session_id
+        let task_slug = if let Some(sid) = session_id.as_ref() {
+            sid.clone()
+        } else {
+            // Check if we have a current session
+            let current = self.current_session.read().ok().and_then(|c| c.clone());
+            if let Some(sid) = current {
+                sid
+            } else {
+                // New session - generate slug using LLM
+                let (provider, model) = self.get_slug_provider_model();
+                generate_slug(&task, &provider, &model).await
+            }
+        };
+
+        // Set current session
+        self.set_current_session(task_slug.clone());
+
+        // Create session directory
+        let session_dir = self.session_dir(&task_slug);
+        std::fs::create_dir_all(&session_dir).map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to create session directory: {}", e),
+                None,
+            )
+        })?;
+
+        // Save session metadata for new sessions
+        if session_id.is_none() {
+            let meta = SessionMeta::new(task_slug.clone(), task.clone());
+            self.save_session_meta(&session_dir, &meta)?;
+        }
+
+        // Convert human response if provided
+        let hr = human_response.map(|p| HumanResponse {
+            response: p.response,
+            approved: p.approved,
+        });
+
+        // Create orchestrator with shared session registry
+        let orchestrator = GooseOrchestrator::new(
+            self.config.orchestrator.clone(),
+            self.config.guardrails.clone(),
+            self.base_dir.clone(),
+            session_dir.clone(),
+            self.session_registry.clone(),
+        );
+
+        // Run orchestrator
+        let working_dir = Some(self.base_dir.clone());
+        let result = orchestrator
+            .run(task, working_dir, hr, Some(task_slug.clone()))
+            .await;
+
+        match result {
+            Ok(result) => {
+                // Determine status string
+                let status = match &result.status {
+                    crate::orchestrator::OrchestrationStatus::Completed => "approved",
+                    crate::orchestrator::OrchestrationStatus::Running => "in_progress",
+                    crate::orchestrator::OrchestrationStatus::Paused { .. } => "needs_input",
+                    crate::orchestrator::OrchestrationStatus::HardStopped { .. } => "hard_stopped",
+                    crate::orchestrator::OrchestrationStatus::Failed { .. } => "failed",
+                };
+
+                let response = serde_json::json!({
+                    "session_id": task_slug,
+                    "status": status,
+                    "iterations": result.iterations,
+                    "tool_calls": result.tool_calls,
+                    "total_tokens": result.total_tokens,
+                    "triggered_conditions": result.triggered_conditions,
+                    "has_plan": result.final_plan.is_some(),
+                });
+
+                Ok(CallToolResult::success(vec![
+                    Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
+                        .with_audience(vec![Role::Assistant]),
+                ]))
+            }
+            Err(e) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Orchestrator failed: {}", e),
+                None,
+            )),
         }
     }
 }

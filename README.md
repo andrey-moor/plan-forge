@@ -119,6 +119,10 @@ cargo run -- run --task "your task" --verbose
 | `--output` | `-o` | Output directory for plan files (default: ./dev/active) |
 | `--threshold` | | Review pass threshold 0.0-1.0 (default: 0.8) |
 | `--verbose` | `-v` | Enable debug logging |
+| `--use-orchestrator` | | Use LLM-powered orchestrator instead of deterministic loop |
+| `--orchestrator-model` | | Override orchestrator model |
+| `--orchestrator-provider` | | Override orchestrator provider |
+| `--max-total-tokens` | | Maximum total tokens for orchestrator session |
 
 ## Configuration
 
@@ -377,6 +381,12 @@ See [MCP Servers](https://github.com/modelcontextprotocol/servers) for more opti
 
 ## Architecture
 
+Plan-forge supports two execution modes:
+
+### Legacy Mode (Default)
+
+The deterministic loop controller runs a fixed plan-review-update cycle:
+
 ```text
 Task Description
        │
@@ -405,12 +415,40 @@ Task Description
     └────┘
 ```
 
+### Orchestrator Mode (Experimental)
+
+Use `--use-orchestrator` to enable an LLM-powered orchestrator that makes dynamic decisions about the planning workflow. The orchestrator:
+
+- Uses goose's in-process MCP extension pattern for tool coordination
+- Enforces 6 mandatory conditions that require human approval (security, sensitive files, low scores, iteration limits, API changes, data deletion)
+- Implements hard stops for token budget, max iterations, and timeouts
+- Supports pausing for human input and resuming sessions
+
+```bash
+# Enable orchestrator mode
+cargo run -- run --task "your task" --use-orchestrator
+
+# With token budget limit
+cargo run -- run --task "your task" --use-orchestrator --max-total-tokens 100000
+```
+
+**Orchestrator Guardrails:**
+
+| Condition | Trigger |
+|-----------|---------|
+| SecuritySensitive | Plan contains credentials, auth, encryption keywords |
+| SensitiveFilePattern | Plan modifies .env, .pem, secrets files |
+| LowScoreThreshold | Review score below 0.5 |
+| IterationSoftLimit | Reached 7+ iterations |
+| BreakingApiChanges | Plan modifies public API signatures |
+| DataDeletionOperations | Plan includes DROP TABLE, rm -rf, etc. |
+
 ### Core Flow
 
 1. **Planner** generates a structured plan using the LLM with codebase exploration tools
 2. **Hard Checks** validate plan structure (has phases, tasks, acceptance criteria)
 3. **Reviewer** evaluates gaps, clarity, and feasibility via LLM
-4. **Loop Controller** decides: refine (score < threshold) or accept (score >= threshold)
+4. **Loop Controller** (or Orchestrator) decides: refine (score < threshold) or accept (score >= threshold)
 5. **Output** writes final markdown files to `./dev/active/<task-slug>/`
 
 ### Output Structure
@@ -482,6 +520,16 @@ Add to your project's `.mcp.json`:
 | `plan_list` | List all planning sessions |
 | `plan_get` | Read plan, tasks, or context markdown files |
 | `plan_approve` | Force approve a plan and write to dev/active/ |
+
+**`plan_run` parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `task` | Task description (required for new sessions) |
+| `session_id` | Resume an existing session |
+| `reset_turns` | Reset turn counter when resuming |
+| `use_orchestrator` | Enable LLM-powered orchestrator mode |
+| `human_response` | Provide human response when resuming paused session |
 
 ### Session Status
 

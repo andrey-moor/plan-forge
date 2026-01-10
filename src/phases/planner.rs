@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -13,7 +14,7 @@ use goose::session::{SessionManager, session_manager::SessionType};
 
 use crate::config::PlanningConfig;
 use crate::models::Plan;
-use crate::orchestrator::LoopState;
+use crate::orchestrator::{LoopState, TokenUsage};
 use crate::recipes::load_recipe;
 
 use super::Planner;
@@ -249,6 +250,142 @@ Return ONLY the updated JSON plan.
 "#,
             state.conversation_context.original_task, plan_json, feedback
         )
+    }
+
+    /// Generate a plan and return raw JSON value with token usage.
+    /// Used by the orchestrator for schema-flexible plan generation.
+    pub async fn generate_plan_json(
+        &self,
+        task: &str,
+        feedback: Option<&[String]>,
+        working_dir: Option<&str>,
+    ) -> Result<(Value, TokenUsage)> {
+        info!("Generating plan JSON for orchestrator");
+
+        // Build prompt
+        let prompt = if let Some(fb) = feedback {
+            format!(
+                r#"Update the development plan based on review feedback.
+
+## Task
+{}
+
+## Review Feedback to Address
+{}
+
+## Requirements
+- Address ALL feedback items
+- Output the updated plan as a JSON object
+- Increment the metadata.version and metadata.iteration
+- Update metadata.last_updated
+
+Return ONLY the JSON plan.
+"#,
+                task,
+                fb.join("\n")
+            )
+        } else {
+            format!(
+                r#"Create a comprehensive development plan for the following task:
+
+## Task
+{}
+
+## Requirements
+- Output your plan as a JSON object
+- Include all phases, checkpoints, and tasks
+- Identify acceptance criteria, file references, and risks
+- Use deterministic language (no "might", "consider", etc.)
+
+Return ONLY the JSON plan.
+"#,
+                task
+            )
+        };
+
+        // Load recipe
+        let recipe = load_recipe(&self.config.recipe, &self.base_dir, "planner")?;
+
+        // Create provider and agent
+        let provider = self.create_provider(&recipe).await?;
+        let agent = Agent::new();
+
+        let wd = working_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let session = SessionManager::create_session(
+            wd.clone(),
+            format!("orchestrator-planner-{}", chrono::Utc::now().timestamp()),
+            SessionType::Hidden,
+        )
+        .await
+        .context("Failed to create planner session")?;
+
+        let session_id = session.id.clone();
+        agent.update_provider(provider, &session_id).await?;
+
+        if let Some(extensions) = &recipe.extensions {
+            for extension in extensions {
+                if let Err(e) = agent.add_extension(extension.clone()).await {
+                    tracing::warn!("Failed to add extension: {:?}", e);
+                }
+            }
+        }
+
+        agent
+            .apply_recipe_components(recipe.sub_recipes.clone(), recipe.response.clone(), true)
+            .await;
+
+        if let Some(instructions) = &recipe.instructions {
+            agent.override_system_prompt(instructions.clone()).await;
+        }
+
+        let session_config = SessionConfig {
+            id: session_id.clone(),
+            schedule_id: None,
+            max_turns: Some(100),
+            retry_config: None,
+        };
+
+        let user_message = Message::user().with_text(&prompt);
+        let mut stream = agent
+            .reply(user_message, session_config, None)
+            .await
+            .context("Failed to start planner agent")?;
+
+        let mut last_message = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(AgentEvent::Message(msg)) => {
+                    last_message = msg.as_concat_text();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Planner error: {:?}", e);
+                }
+            }
+        }
+
+        // Get token usage from session
+        let token_usage = if let Ok(sess) =
+            SessionManager::get_session(&session_id, false).await
+        {
+            TokenUsage::new(sess.accumulated_input_tokens, sess.accumulated_output_tokens)
+        } else {
+            TokenUsage::default()
+        };
+
+        // Parse response as JSON Value (flexible schema)
+        let plan_json: Value = if let Ok(json) = serde_json::from_str(&last_message) {
+            json
+        } else if let Some(json_str) = extract_json_block(&last_message) {
+            serde_json::from_str(json_str).context("Failed to parse plan JSON")?
+        } else {
+            return Err(anyhow::anyhow!("Response is not valid JSON"));
+        };
+
+        Ok((plan_json, token_usage))
     }
 }
 

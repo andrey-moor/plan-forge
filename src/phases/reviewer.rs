@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -13,7 +14,7 @@ use goose::session::{SessionManager, session_manager::SessionType};
 
 use crate::config::{HardChecklist, ReviewConfig};
 use crate::models::{LlmReview, Plan, ReviewResult};
-use crate::orchestrator::LoopState;
+use crate::orchestrator::{LoopState, TokenUsage};
 use crate::recipes::load_recipe;
 
 use super::Reviewer;
@@ -155,7 +156,10 @@ impl GooseReviewer {
 
     fn build_review_prompt(&self, plan: &Plan) -> String {
         let plan_json = serde_json::to_string_pretty(plan).unwrap_or_default();
+        self.build_review_prompt_from_json(&plan_json)
+    }
 
+    fn build_review_prompt_from_json(&self, plan_json: &str) -> String {
         format!(
             r#"Review the following development plan and identify any gaps, unclear areas, or issues.
 
@@ -217,6 +221,127 @@ Score guidelines:
 "#,
             plan_json
         )
+    }
+
+    /// Review a plan JSON and return raw JSON value with token usage.
+    /// Used by the orchestrator for schema-flexible review.
+    pub async fn review_plan_json(&self, plan_json: &Value) -> Result<(Value, TokenUsage)> {
+        info!("Running plan review JSON for orchestrator");
+
+        let plan_str = serde_json::to_string_pretty(plan_json).unwrap_or_default();
+        let prompt = self.build_review_prompt_from_json(&plan_str);
+
+        // Load recipe
+        let recipe = load_recipe(&self.config.recipe, &self.base_dir, "reviewer")?;
+
+        // Create provider and agent
+        let provider = self.create_provider(&recipe).await?;
+        let agent = Agent::new();
+
+        let wd = std::env::current_dir().unwrap_or_default();
+
+        let session = SessionManager::create_session(
+            wd.clone(),
+            format!("orchestrator-reviewer-{}", chrono::Utc::now().timestamp()),
+            SessionType::Hidden,
+        )
+        .await
+        .context("Failed to create reviewer session")?;
+
+        let session_id = session.id.clone();
+        agent.update_provider(provider, &session_id).await?;
+
+        if let Some(extensions) = &recipe.extensions {
+            for extension in extensions {
+                if let Err(e) = agent.add_extension(extension.clone()).await {
+                    tracing::warn!("Failed to add reviewer extension: {:?}", e);
+                }
+            }
+        }
+
+        agent
+            .apply_recipe_components(recipe.sub_recipes.clone(), recipe.response.clone(), true)
+            .await;
+
+        if let Some(instructions) = &recipe.instructions {
+            agent.override_system_prompt(instructions.clone()).await;
+        }
+
+        let session_config = SessionConfig {
+            id: session_id.clone(),
+            schedule_id: None,
+            max_turns: Some(50),
+            retry_config: None,
+        };
+
+        let user_message = Message::user().with_text(&prompt);
+        let mut stream = agent
+            .reply(user_message, session_config, None)
+            .await
+            .context("Failed to start reviewer agent")?;
+
+        let mut last_message = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(AgentEvent::Message(msg)) => {
+                    last_message = msg.as_concat_text();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Reviewer error: {:?}", e);
+                }
+            }
+        }
+
+        // Get token usage from session
+        let token_usage = if let Ok(sess) =
+            SessionManager::get_session(&session_id, false).await
+        {
+            TokenUsage::new(sess.accumulated_input_tokens, sess.accumulated_output_tokens)
+        } else {
+            TokenUsage::default()
+        };
+
+        // Parse response as JSON Value (flexible schema)
+        let review_json: Value = if let Ok(json) = serde_json::from_str(&last_message) {
+            json
+        } else if let Some(json_str) = extract_json_block(&last_message) {
+            serde_json::from_str(json_str).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "overall_assessment": "Failed to parse review",
+                    "score": 0.5,
+                    "passed": false,
+                    "summary": "Review parsing failed"
+                })
+            })
+        } else {
+            serde_json::json!({
+                "overall_assessment": "Failed to parse review response",
+                "score": 0.5,
+                "passed": false,
+                "summary": "Review parsing failed - response was not valid JSON"
+            })
+        };
+
+        // Add passed field based on score and threshold
+        let score = review_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let passed = score >= self.config.pass_threshold;
+
+        let mut result = review_json;
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("passed".to_string(), Value::Bool(passed));
+            obj.insert(
+                "summary".to_string(),
+                Value::String(format!(
+                    "Review score: {:.2} (threshold: {:.2}) - {}",
+                    score,
+                    self.config.pass_threshold,
+                    if passed { "PASSED" } else { "NEEDS REVISION" }
+                )),
+            );
+        }
+
+        Ok((result, token_usage))
     }
 }
 

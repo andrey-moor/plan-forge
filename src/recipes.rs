@@ -14,6 +14,9 @@ pub const DEFAULT_PLANNER_RECIPE: &str = include_str!("../recipes/planner.yaml")
 /// Bundled default reviewer recipe
 pub const DEFAULT_REVIEWER_RECIPE: &str = include_str!("../recipes/reviewer.yaml");
 
+/// Bundled default orchestrator recipe
+pub const DEFAULT_ORCHESTRATOR_RECIPE: &str = include_str!("../recipes/orchestrator.yaml");
+
 /// Recipe resolution result
 pub enum RecipeSource {
     /// Recipe loaded from a file path
@@ -82,6 +85,7 @@ pub fn resolve_recipe(recipe_path: &Path, base_dir: &Path, recipe_name: &str) ->
     match recipe_name {
         "planner" => RecipeSource::Bundled(DEFAULT_PLANNER_RECIPE),
         "reviewer" => RecipeSource::Bundled(DEFAULT_REVIEWER_RECIPE),
+        "orchestrator" => RecipeSource::Bundled(DEFAULT_ORCHESTRATOR_RECIPE),
         _ => {
             // Unknown recipe name - try to use the first bundled recipe as fallback
             // This shouldn't happen in normal usage
@@ -106,6 +110,7 @@ mod tests {
     fn test_bundled_recipes_not_empty() {
         assert!(!DEFAULT_PLANNER_RECIPE.is_empty());
         assert!(!DEFAULT_REVIEWER_RECIPE.is_empty());
+        assert!(!DEFAULT_ORCHESTRATOR_RECIPE.is_empty());
     }
 
     #[test]
@@ -115,6 +120,8 @@ mod tests {
             .expect("planner recipe should be valid YAML");
         let _: serde_yaml::Value = serde_yaml::from_str(DEFAULT_REVIEWER_RECIPE)
             .expect("reviewer recipe should be valid YAML");
+        let _: serde_yaml::Value = serde_yaml::from_str(DEFAULT_ORCHESTRATOR_RECIPE)
+            .expect("orchestrator recipe should be valid YAML");
     }
 
     #[test]

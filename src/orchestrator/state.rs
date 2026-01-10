@@ -1,4 +1,8 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 use crate::models::{Plan, ReviewResult};
+use super::guardrails::MandatoryCondition;
 
 /// State for resuming from an existing plan
 #[derive(Debug, Clone)]
@@ -81,6 +85,7 @@ impl LoopState {
     }
 
     /// Update pending feedback from the latest review
+    #[allow(deprecated)]
     pub fn update_feedback_from_review(&mut self, review: &ReviewResult) {
         self.conversation_context.pending_feedback = review.extract_feedback();
     }
@@ -97,12 +102,25 @@ impl LoopState {
 }
 
 /// Result of the entire loop execution
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LoopResult {
+    /// The final plan (parsed from JSON)
     pub final_plan: Plan,
+    /// The final plan as raw JSON (for orchestrator mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_plan_json: Option<Value>,
+    /// Total iterations completed
     pub total_iterations: u32,
+    /// The final review result
     pub final_review: ReviewResult,
+    /// Whether the session was successful
     pub success: bool,
+    /// Triggered mandatory conditions (orchestrator mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triggered_conditions: Option<Vec<MandatoryCondition>>,
+    /// Total tokens consumed (orchestrator mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 impl LoopResult {
@@ -112,9 +130,12 @@ impl LoopResult {
 
         Some(Self {
             final_plan: plan,
+            final_plan_json: None,
             total_iterations: state.iteration,
             final_review: review.clone(),
             success: review.passed,
+            triggered_conditions: None,
+            total_tokens: None,
         })
     }
 }

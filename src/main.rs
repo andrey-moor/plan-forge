@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+#[allow(deprecated)]
 use plan_forge::{
-    CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, Plan,
-    PlanForgeServer, ResumeState, slugify,
+    CliConfig, FileOutputWriter, GooseOrchestrator, GoosePlanner, GooseReviewer, HumanResponse,
+    LoopController, Plan, PlanForgeServer, ResumeState, SessionRegistry, slugify,
 };
 
 // Re-export MCP server types from goose-mcp
@@ -148,6 +149,32 @@ struct RunArgs {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    // ============ Orchestrator Mode Flags ============
+
+    /// Use LLM-powered orchestrator instead of deterministic loop controller
+    #[arg(long)]
+    use_orchestrator: bool,
+
+    /// Override orchestrator model (e.g., "claude-sonnet-4-20250514")
+    #[arg(long)]
+    orchestrator_model: Option<String>,
+
+    /// Override orchestrator provider (e.g., "anthropic", "openai")
+    #[arg(long)]
+    orchestrator_provider: Option<String>,
+
+    /// Maximum total tokens for orchestrator session (default: 500000)
+    #[arg(long)]
+    max_total_tokens: Option<u64>,
+
+    /// Human response for resuming paused orchestrator session
+    #[arg(long)]
+    human_response: Option<String>,
+
+    /// Approve the pending human input request (use with --human-response)
+    #[arg(long)]
+    approve: bool,
 }
 
 #[tokio::main]
@@ -298,6 +325,7 @@ fn resolve_input(args: &RunArgs) -> Result<(String, String, Option<ResumeState>)
     }
 }
 
+#[allow(deprecated)] // Legacy LoopController used in non-orchestrator path
 async fn handle_run_command(args: RunArgs) -> Result<()> {
     // Set up logging
     let filter = if args.verbose {
@@ -359,29 +387,76 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // Create components
-    let planner = GoosePlanner::new(config.planning.clone(), base_dir.clone());
-    let reviewer = GooseReviewer::new(config.review.clone(), base_dir);
-    let output = FileOutputWriter::new(config.output.clone());
+    // Branch based on orchestrator mode
+    if args.use_orchestrator || config.use_orchestrator {
+        // ============ Orchestrator Mode ============
+        info!("Using LLM-powered orchestrator mode");
 
-    // Create loop controller
-    let mut controller =
-        LoopController::new(planner, reviewer, output, config).with_task_slug(task_slug.clone());
-
-    // Apply resume state if present
-    if let Some(resume) = resume_state {
-        if !resume.feedback.is_empty() {
-            info!("Resuming with user feedback");
-        } else {
-            info!("Resuming without feedback (re-running review)");
+        // Apply orchestrator-specific config overrides
+        if let Some(model) = args.orchestrator_model {
+            config.orchestrator.model_override = Some(model);
         }
-        controller = controller.with_resume(resume);
+        if let Some(provider) = args.orchestrator_provider {
+            config.orchestrator.provider_override = Some(provider);
+        }
+        if let Some(tokens) = args.max_total_tokens {
+            config.guardrails.max_total_tokens = tokens;
+        }
+
+        // Build human response if provided
+        let human_response = args.human_response.map(|response| HumanResponse {
+            response,
+            approved: args.approve,
+        });
+
+        // Create session registry for concurrent session management
+        let session_registry = std::sync::Arc::new(SessionRegistry::new());
+
+        // Create orchestrator
+        let orchestrator = GooseOrchestrator::new(
+            config.orchestrator.clone(),
+            config.guardrails.clone(),
+            base_dir.clone(),
+            runs_dir.clone(),
+            session_registry,
+        );
+
+        // Run orchestrator
+        let working_dir_path = args.working_dir.clone();
+        let result = orchestrator
+            .run(task, working_dir_path, human_response, None)
+            .await?;
+
+        // Convert to LoopResult for consistent output
+        let loop_result: plan_forge::LoopResult = result.into();
+        print_result(loop_result)
+    } else {
+        // ============ Legacy Loop Controller Mode ============
+
+        // Create components
+        let planner = GoosePlanner::new(config.planning.clone(), base_dir.clone());
+        let reviewer = GooseReviewer::new(config.review.clone(), base_dir);
+        let output = FileOutputWriter::new(config.output.clone());
+
+        // Create loop controller
+        let mut controller =
+            LoopController::new(planner, reviewer, output, config).with_task_slug(task_slug.clone());
+
+        // Apply resume state if present
+        if let Some(resume) = resume_state {
+            if !resume.feedback.is_empty() {
+                info!("Resuming with user feedback");
+            } else {
+                info!("Resuming without feedback (re-running review)");
+            }
+            controller = controller.with_resume(resume);
+        }
+
+        let working_dir = args.working_dir.map(|p| p.to_string_lossy().to_string());
+        let result = controller.run(task, working_dir).await?;
+
+        print_result(result)
     }
-
-    let working_dir = args.working_dir.map(|p| p.to_string_lossy().to_string());
-    let result = controller.run(task, working_dir).await?;
-
-    print_result(result)
 }
 
 fn print_result(result: plan_forge::LoopResult) -> Result<()> {

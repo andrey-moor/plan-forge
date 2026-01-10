@@ -26,6 +26,12 @@ cargo run -- run --path dev/active/my-task-slug/ --task "also add error handling
 # Run with verbose logging
 cargo run -- run --task "your task" --verbose
 
+# Run with LLM-powered orchestrator (experimental)
+cargo run -- run --task "your task" --use-orchestrator
+
+# Orchestrator with token budget limit
+cargo run -- run --task "your task" --use-orchestrator --max-total-tokens 100000
+
 # Run tests
 cargo test
 
@@ -80,15 +86,19 @@ Task → Planner (LLM) → Plan → Reviewer (LLM) → ReviewResult
                          └── Update with feedback ←─┘
 ```
 
-The `LoopController` orchestrates this cycle until either:
+The `LoopController` (legacy) or `GooseOrchestrator` (with `--use-orchestrator`) orchestrates this cycle until either:
 - The plan passes review (score >= threshold with no hard check failures)
 - Maximum iterations reached
 - Perfect score achieved (early exit if enabled)
 - Human input required (reviewer flags security concern or ambiguity)
+- Hard stop triggered (token budget, timeout)
 
 ### Key Components
 
-- **LoopController** (`src/orchestrator/loop_controller.rs`): Manages the plan-review-update loop, tracks state, handles iteration logic
+- **GooseOrchestrator** (`src/phases/orchestrator.rs`): LLM-powered orchestrator with guardrails. Uses goose Agent with in-process MCP extension pattern for dynamic workflow decisions.
+- **LoopController** (`src/orchestrator/loop_controller.rs`): [Deprecated] Legacy deterministic loop controller
+- **OrchestratorClient** (`src/orchestrator/client.rs`): MCP client implementing tool handlers for plan generation, review, and human input. Registered via ExtensionManager.
+- **Guardrails** (`src/orchestrator/guardrails.rs`): Enforces 6 mandatory conditions requiring human approval plus hard stops for token budget/iterations/timeout
 - **Planner trait** (`src/phases/mod.rs`): Interface for plan generation. `GoosePlanner` uses goose Agent with recipes
 - **Reviewer trait** (`src/phases/mod.rs`): Interface for plan review. `GooseReviewer` validates plans and produces structured feedback
 - **Plan model** (`src/models/plan.rs`): Structured plan with phases, checkpoints, tasks, acceptance criteria, file references, and risks

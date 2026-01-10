@@ -16,3 +16,60 @@ loop_config:
 output:
   runs_dir: ./.plan-forge
   active_dir: ./dev/active
+
+# Guardrails configuration for orchestrator mode
+guardrails:
+  # Maximum iterations before hard stop
+  max_iterations: 10
+  # Maximum total tokens before hard stop (500,000)
+  max_total_tokens: 500000
+  # Maximum tool calls before hard stop
+  max_tool_calls: 100
+  # Execution timeout in seconds (10 minutes)
+  execution_timeout_secs: 600
+  # Soft limit for iterations (triggers human input request)
+  iteration_soft_limit: 7
+  # Score threshold below which human input is required
+  low_score_threshold: 0.5
+  # Keywords that trigger security-sensitive condition
+  security_keywords:
+    - credential
+    - auth
+    - encrypt
+    - secret
+    - token
+    - password
+    - api_key
+    - private_key
+    - certificate
+  # File patterns that trigger sensitive file condition
+  sensitive_file_patterns:
+    - "*.env"
+    - "*.env.*"
+    - "*secret*"
+    - "*credential*"
+    - "*.pem"
+    - "*.key"
+    - "**/secrets/**"
+  # Patterns indicating breaking API changes
+  breaking_api_patterns:
+    - "pub fn"
+    - "pub struct"
+    - "pub enum"
+    - "pub trait"
+  # Patterns indicating data deletion operations
+  data_deletion_patterns:
+    - "DROP TABLE"
+    - "DELETE FROM"
+    - "TRUNCATE"
+    - "rm -rf"
+    - "shutil.rmtree"
+
+# Orchestrator mode configuration
+orchestrator:
+  recipe: recipes/orchestrator.yaml
+  provider_override: null
+  model_override: null
+
+# Use LLM-powered orchestrator instead of deterministic loop controller
+use_orchestrator: false

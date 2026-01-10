@@ -4639,6 +4639,7 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "futures",
+ "glob",
  "goose",
  "goose-mcp",
  "jsonschema 0.29.1",
@@ -4651,6 +4652,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

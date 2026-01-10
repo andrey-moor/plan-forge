@@ -68,6 +68,10 @@ impl ReviewResult {
     }
 
     /// Extract actionable feedback from the review
+    #[deprecated(
+        since = "0.2.0",
+        note = "Orchestrator handles feedback semantically via LLM in generate_plan"
+    )]
     pub fn extract_feedback(&self) -> Vec<String> {
         let mut feedback = Vec::new();
 

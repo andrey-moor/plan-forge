@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::models::ReviewResult;
+use crate::orchestrator::{GuardrailHardStop, MandatoryCondition};
 
 /// Session status derived from files in .plan-forge/<session>/
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// No plan-iteration files exist yet
@@ -22,6 +23,23 @@ pub enum SessionStatus {
     Approved,
     /// Iteration count >= max without approval
     MaxTurns,
+    /// Orchestrator triggered a guardrail condition requiring human input
+    GuardrailTriggered {
+        /// The mandatory condition that was triggered
+        condition: MandatoryCondition,
+    },
+    /// Orchestrator paused waiting for human input
+    PausedForHumanInput {
+        /// The question being asked
+        question: String,
+        /// Category of the input request
+        category: String,
+    },
+    /// Orchestrator hit a hard stop condition
+    HardStopped {
+        /// The reason for the hard stop
+        reason: GuardrailHardStop,
+    },
 }
 
 impl std::fmt::Display for SessionStatus {
@@ -32,6 +50,9 @@ impl std::fmt::Display for SessionStatus {
             SessionStatus::NeedsInput => write!(f, "needs_input"),
             SessionStatus::Approved => write!(f, "approved"),
             SessionStatus::MaxTurns => write!(f, "max_turns"),
+            SessionStatus::GuardrailTriggered { .. } => write!(f, "guardrail_triggered"),
+            SessionStatus::PausedForHumanInput { .. } => write!(f, "paused_for_human_input"),
+            SessionStatus::HardStopped { .. } => write!(f, "hard_stopped"),
         }
     }
 }
@@ -53,11 +74,42 @@ pub struct SessionInfo {
     pub input_reason: Option<String>,
     /// Plan title (if available)
     pub title: Option<String>,
+    /// Triggered mandatory condition (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triggered_condition: Option<MandatoryCondition>,
+    /// Total tokens consumed (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    /// Total tool calls made (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u32>,
+    /// Token budget remaining (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget_remaining: Option<u64>,
+    /// All triggered conditions during session (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triggered_conditions: Option<Vec<MandatoryCondition>>,
+    /// Pending human input request (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_human_input: Option<PendingHumanInput>,
+}
+
+/// Pending human input request information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingHumanInput {
+    /// Question being asked
+    pub question: String,
+    /// Category of the input request
+    pub category: String,
+    /// Condition that triggered the request (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<MandatoryCondition>,
 }
 
 /// Derive session status from files in a session directory.
 ///
 /// Status derivation logic:
+/// - First checks for orchestration-state.json (orchestrator mode)
 /// - Ready: No plan-iteration-*.json files exist
 /// - NeedsInput: Latest review has requires_human_input: true
 /// - Approved: Latest review passed (score >= threshold AND no requires_human_input)
@@ -68,12 +120,124 @@ pub fn derive_status(
     pass_threshold: f32,
     max_iterations: u32,
 ) -> anyhow::Result<SessionInfo> {
+    use crate::orchestrator::OrchestrationState;
+
     let session_id = session_dir
         .file_name()
         .and_then(|n| n.to_str())
         .map(String::from)
         .ok_or_else(|| anyhow::anyhow!("Invalid session directory: {:?}", session_dir))?;
 
+    // Check for orchestrator state file first
+    if let Ok(Some(orch_state)) = OrchestrationState::load(session_dir) {
+        return derive_orchestrator_status(session_id, session_dir, orch_state);
+    }
+
+    // Fall back to legacy file-based derivation
+    derive_legacy_status(session_id, session_dir, pass_threshold, max_iterations)
+}
+
+/// Derive status from orchestration state file.
+fn derive_orchestrator_status(
+    session_id: String,
+    session_dir: &Path,
+    state: crate::orchestrator::OrchestrationState,
+) -> anyhow::Result<SessionInfo> {
+    use crate::orchestrator::OrchestrationStatus;
+
+    let (status, triggered_condition): (SessionStatus, Option<MandatoryCondition>) =
+        match &state.status {
+            OrchestrationStatus::Running => (SessionStatus::InProgress, None),
+            OrchestrationStatus::Completed => (SessionStatus::Approved, None),
+            OrchestrationStatus::Paused { condition } => {
+                if let Some(cond) = condition {
+                    (
+                        SessionStatus::GuardrailTriggered {
+                            condition: cond.clone(),
+                        },
+                        Some(cond.clone()),
+                    )
+                } else {
+                    // Paused without a specific condition
+                    (SessionStatus::NeedsInput, None)
+                }
+            }
+            OrchestrationStatus::Failed { error } => (
+                SessionStatus::HardStopped {
+                    reason: GuardrailHardStop::ExecutionError {
+                        message: error.clone(),
+                    },
+                },
+                None,
+            ),
+            OrchestrationStatus::HardStopped { reason } => (
+                SessionStatus::HardStopped {
+                    reason: reason.clone(),
+                },
+                None,
+            ),
+        };
+
+    // Check for pending human input
+    let (final_status, input_reason) = if let Some(pending) = &state.pending_human_input {
+        (
+            SessionStatus::PausedForHumanInput {
+                question: pending.question.clone(),
+                category: pending.category.clone(),
+            },
+            Some(pending.question.clone()),
+        )
+    } else {
+        (status, None)
+    };
+
+    // Extract title from current plan if available
+    let title = state
+        .current_plan
+        .as_ref()
+        .and_then(|p| p.get("title"))
+        .and_then(|t| t.as_str())
+        .map(String::from);
+
+    // Calculate token budget remaining (default max is 500,000)
+    let max_total_tokens = 500_000u64;
+    let token_budget_remaining = max_total_tokens.saturating_sub(state.total_tokens);
+
+    // Map pending human input
+    let pending_human_input = state.pending_human_input.as_ref().map(|p| PendingHumanInput {
+        question: p.question.clone(),
+        category: p.category.clone(),
+        condition: p.condition.clone(),
+    });
+
+    Ok(SessionInfo {
+        session_id,
+        session_dir: session_dir.to_path_buf(),
+        iteration: state.iteration,
+        status: final_status,
+        latest_score: None, // Orchestrator doesn't track score the same way
+        input_reason,
+        title,
+        triggered_condition,
+        total_tokens: Some(state.total_tokens),
+        tool_calls: Some(state.tool_calls),
+        token_budget_remaining: Some(token_budget_remaining),
+        triggered_conditions: if state.triggered_conditions.is_empty() {
+            None
+        } else {
+            Some(state.triggered_conditions.clone())
+        },
+        pending_human_input,
+    })
+}
+
+/// Derive status from legacy plan/review files.
+fn derive_legacy_status(
+    session_id: String,
+    session_dir: &Path,
+    pass_threshold: f32,
+    max_iterations: u32,
+) -> anyhow::Result<SessionInfo> {
     // Find highest plan iteration
     let (plan_iteration, title) = find_latest_plan(session_dir)?;
 
@@ -87,6 +251,12 @@ pub fn derive_status(
             latest_score: None,
             input_reason: None,
             title: None,
+            triggered_condition: None,
+            total_tokens: None,
+            tool_calls: None,
+            token_budget_remaining: None,
+            triggered_conditions: None,
+            pending_human_input: None,
         });
     }
 
@@ -123,6 +293,12 @@ pub fn derive_status(
         latest_score,
         input_reason,
         title,
+        triggered_condition: None,
+        total_tokens: None,
+        tool_calls: None,
+        token_budget_remaining: None,
+        triggered_conditions: None,
+        pending_human_input: None,
     })
 }
 

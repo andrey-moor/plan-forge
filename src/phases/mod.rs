@@ -1,7 +1,9 @@
+pub mod orchestrator;
 pub mod planner;
 pub mod reviewer;
 pub mod updater;
 
+pub use orchestrator::*;
 pub use planner::*;
 pub use reviewer::*;
 pub use updater::*;
@@ -27,6 +29,10 @@ pub trait Reviewer: Send + Sync {
 }
 
 /// Trait for incorporating feedback into plan updates
+#[deprecated(
+    since = "0.2.0",
+    note = "Orchestrator uses generate_plan with feedback parameter instead"
+)]
 #[async_trait]
 pub trait Updater: Send + Sync {
     /// Update plan based on review feedback

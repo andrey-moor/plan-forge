@@ -16,6 +16,10 @@ pub struct HumanInputRequired {
 }
 
 /// Controls the plan-review-update feedback loop
+#[deprecated(
+    since = "0.2.0",
+    note = "Use GooseOrchestrator with --use-orchestrator flag for LLM-powered orchestration"
+)]
 pub struct LoopController<P, R, O>
 where
     P: Planner,
@@ -30,6 +34,7 @@ where
     task_slug: Option<String>,
 }
 
+#[allow(deprecated)]
 impl<P, R, O> LoopController<P, R, O>
 where
     P: Planner,
