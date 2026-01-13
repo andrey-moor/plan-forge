@@ -2463,7 +2463,7 @@ dependencies = [
 [[package]]
 name = "goose"
 version = "1.19.0"
-source = "git+https://github.com/block/goose?branch=main#085f48a29720bc74551d2d7a69b1fa6d4f236a56"
+source = "git+https://github.com/andrey-moor/goose?branch=feat%2Fmicrosoft-foundry-provider#b13b6b539cef8bb1fe48d3eb8feb864136b8b637"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2544,7 +2544,7 @@ dependencies = [
 [[package]]
 name = "goose-mcp"
 version = "1.19.0"
-source = "git+https://github.com/block/goose?branch=main#085f48a29720bc74551d2d7a69b1fa6d4f236a56"
+source = "git+https://github.com/andrey-moor/goose?branch=feat%2Fmicrosoft-foundry-provider#b13b6b539cef8bb1fe48d3eb8feb864136b8b637"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4644,6 +4644,7 @@ dependencies = [
  "goose-mcp",
  "jsonschema 0.29.1",
  "minijinja",
+ "regex",
  "rmcp",
  "schemars 1.2.0",
  "serde",

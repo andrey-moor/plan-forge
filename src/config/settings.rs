@@ -14,9 +14,14 @@ pub struct CliConfig {
     /// Orchestrator mode configuration
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
-    /// Use LLM-powered orchestrator instead of deterministic loop controller
-    #[serde(default)]
+    /// Use LLM-powered orchestrator (default: true).
+    /// Set to false to use deprecated LoopController.
+    #[serde(default = "default_use_orchestrator")]
     pub use_orchestrator: bool,
+}
+
+fn default_use_orchestrator() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +68,11 @@ pub struct OutputConfig {
     pub slug: Option<String>,
 }
 
-/// Configuration for orchestrator guardrails (mandatory human input conditions)
+/// Configuration for orchestrator guardrails.
+///
+/// Contains only numeric/deterministic limits. Pattern-based security checks
+/// (keywords, file patterns, API changes, data deletion) are handled by the
+/// LLM reviewer with full context awareness to avoid false positives.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardrailsConfig {
     /// Maximum iterations before hard stop
@@ -78,24 +87,9 @@ pub struct GuardrailsConfig {
     /// Execution timeout in seconds
     #[serde(default = "default_execution_timeout_secs")]
     pub execution_timeout_secs: u64,
-    /// Soft limit for iterations (triggers human input request)
-    #[serde(default = "default_iteration_soft_limit")]
-    pub iteration_soft_limit: u32,
-    /// Score threshold below which human input is required
-    #[serde(default = "default_low_score_threshold")]
-    pub low_score_threshold: f32,
-    /// Keywords that trigger security-sensitive condition
-    #[serde(default = "default_security_keywords")]
-    pub security_keywords: Vec<String>,
-    /// File patterns that trigger sensitive file condition
-    #[serde(default = "default_sensitive_file_patterns")]
-    pub sensitive_file_patterns: Vec<String>,
-    /// Patterns indicating breaking API changes
-    #[serde(default = "default_breaking_api_patterns")]
-    pub breaking_api_patterns: Vec<String>,
-    /// Patterns indicating data deletion operations
-    #[serde(default = "default_data_deletion_patterns")]
-    pub data_deletion_patterns: Vec<String>,
+    /// Score threshold for determining pass/fail (default 0.8)
+    #[serde(default = "default_score_threshold")]
+    pub score_threshold: f32,
 }
 
 fn default_max_iterations() -> u32 {
@@ -114,57 +108,8 @@ fn default_execution_timeout_secs() -> u64 {
     600 // 10 minutes
 }
 
-fn default_iteration_soft_limit() -> u32 {
-    7
-}
-
-fn default_low_score_threshold() -> f32 {
-    0.5
-}
-
-fn default_security_keywords() -> Vec<String> {
-    vec![
-        "credential".to_string(),
-        "auth".to_string(),
-        "encrypt".to_string(),
-        "secret".to_string(),
-        "token".to_string(),
-        "password".to_string(),
-        "api_key".to_string(),
-        "private_key".to_string(),
-        "certificate".to_string(),
-    ]
-}
-
-fn default_sensitive_file_patterns() -> Vec<String> {
-    vec![
-        "*.env".to_string(),
-        "*.env.*".to_string(),
-        "*secret*".to_string(),
-        "*credential*".to_string(),
-        "*.pem".to_string(),
-        "*.key".to_string(),
-        "**/secrets/**".to_string(),
-    ]
-}
-
-fn default_breaking_api_patterns() -> Vec<String> {
-    vec![
-        "pub fn".to_string(),
-        "pub struct".to_string(),
-        "pub enum".to_string(),
-        "pub trait".to_string(),
-    ]
-}
-
-fn default_data_deletion_patterns() -> Vec<String> {
-    vec![
-        "DROP TABLE".to_string(),
-        "DELETE FROM".to_string(),
-        "TRUNCATE".to_string(),
-        "rm -rf".to_string(),
-        "shutil.rmtree".to_string(),
-    ]
+fn default_score_threshold() -> f32 {
+    0.8
 }
 
 impl Default for GuardrailsConfig {
@@ -174,12 +119,7 @@ impl Default for GuardrailsConfig {
             max_total_tokens: default_max_total_tokens(),
             max_tool_calls: default_max_tool_calls(),
             execution_timeout_secs: default_execution_timeout_secs(),
-            iteration_soft_limit: default_iteration_soft_limit(),
-            low_score_threshold: default_low_score_threshold(),
-            security_keywords: default_security_keywords(),
-            sensitive_file_patterns: default_sensitive_file_patterns(),
-            breaking_api_patterns: default_breaking_api_patterns(),
-            data_deletion_patterns: default_data_deletion_patterns(),
+            score_threshold: default_score_threshold(),
         }
     }
 }
@@ -235,7 +175,7 @@ impl Default for CliConfig {
             },
             guardrails: GuardrailsConfig::default(),
             orchestrator: OrchestratorConfig::default(),
-            use_orchestrator: false,
+            use_orchestrator: default_use_orchestrator(),
         }
     }
 }
@@ -281,11 +221,19 @@ impl CliConfig {
             self.review.pass_threshold = threshold.clamp(0.0, 1.0);
         }
 
-        // Max iterations
+        // Max iterations (applies to both legacy loop and orchestrator)
         if let Ok(val) = std::env::var("PLAN_FORGE_MAX_ITERATIONS")
             && let Ok(max) = val.parse::<u32>()
         {
             self.loop_config.max_iterations = max;
+            self.guardrails.max_iterations = max;
+        }
+
+        // Also apply threshold to guardrails (orchestrator mode uses guardrails config)
+        if let Ok(val) = std::env::var("PLAN_FORGE_THRESHOLD")
+            && let Ok(threshold) = val.parse::<f32>()
+        {
+            self.guardrails.score_threshold = threshold.clamp(0.0, 1.0);
         }
 
         // Planner provider
@@ -370,5 +318,14 @@ impl CliConfig {
     /// (CLI args override everything, applied separately in main.rs)
     pub fn load_with_env(path: Option<&PathBuf>) -> anyhow::Result<Self> {
         Self::load_or_default(path).map(|c| c.apply_env_overrides())
+    }
+
+    /// Get provider and model for slug generation based on orchestrator config.
+    ///
+    /// Returns None if provider or model is not configured (caller should use fallback).
+    pub fn slug_provider_model(&self) -> Option<(String, String)> {
+        let provider = self.orchestrator.provider_override.clone()?;
+        let model = self.orchestrator.model_override.clone()?;
+        Some((provider, model))
     }
 }

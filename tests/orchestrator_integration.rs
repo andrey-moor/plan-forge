@@ -2,16 +2,20 @@
 //!
 //! These tests verify the orchestrator flows including:
 //! - Full flow to completion
-//! - Guardrail condition triggers
+//! - Hard stop enforcement (iterations, tokens, tool calls)
 //! - Resume with human response
 //! - Token budget enforcement
 //! - Concurrent session handling
+//! - ISA types (OpCode, Instruction, GroundingSnapshot)
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use plan_forge::models::{
+    ExistingPattern, GroundingSnapshot, Instruction, OpCode, VerifiedFile, VerifiedTarget,
+};
 use plan_forge::orchestrator::{
-    GuardrailHardStop, Guardrails, GuardrailsConfig, HumanInputRecord, MandatoryCondition,
+    GuardrailHardStop, Guardrails, GuardrailsConfig, HumanInputRecord,
     OrchestrationState, OrchestrationStatus, SessionRegistry, TokenBreakdown,
 };
 
@@ -20,138 +24,29 @@ use plan_forge::orchestrator::{
 // ============================================================================
 
 #[test]
-fn test_guardrails_security_sensitive_detection() {
+fn test_guardrails_score_passes() {
     let config = GuardrailsConfig::default();
     let guardrails = Guardrails::from_config(&config);
 
-    // Plan with security keywords
-    let plan = serde_json::json!({
-        "title": "Add authentication",
-        "phases": [{
-            "name": "Setup",
-            "tasks": [{
-                "title": "Configure API key handling",
-                "description": "Store credentials securely"
-            }]
-        }]
-    });
-
-    let conditions = guardrails.check_all_conditions(&plan, 0.9, 1);
-    assert!(
-        conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::SecuritySensitive { .. })),
-        "Should detect security-sensitive keywords"
-    );
+    // Default threshold is 0.8
+    assert!(!guardrails.score_passes(0.3));
+    assert!(!guardrails.score_passes(0.79));
+    assert!(guardrails.score_passes(0.8));
+    assert!(guardrails.score_passes(0.9));
 }
 
 #[test]
-fn test_guardrails_sensitive_file_detection() {
-    let config = GuardrailsConfig::default();
+fn test_guardrails_custom_score_threshold() {
+    let config = GuardrailsConfig {
+        score_threshold: 0.5,
+        ..Default::default()
+    };
     let guardrails = Guardrails::from_config(&config);
 
-    // Plan modifying .env file
-    let plan = serde_json::json!({
-        "title": "Configure environment",
-        "phases": [{
-            "name": "Setup",
-            "tasks": [{
-                "title": "Update .env file",
-                "file_path": ".env"
-            }]
-        }]
-    });
-
-    let conditions = guardrails.check_all_conditions(&plan, 0.9, 1);
-    assert!(
-        conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::SensitiveFilePattern { .. })),
-        "Should detect sensitive file pattern"
-    );
-}
-
-#[test]
-fn test_guardrails_low_score_threshold() {
-    let config = GuardrailsConfig::default();
-    let guardrails = Guardrails::from_config(&config);
-
-    let plan = serde_json::json!({
-        "title": "Simple task",
-        "phases": []
-    });
-
-    // Score below 0.5 should trigger
-    let conditions = guardrails.check_all_conditions(&plan, 0.3, 1);
-    assert!(
-        conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::LowScoreThreshold { .. })),
-        "Should detect low score"
-    );
-
-    // Score above 0.5 should not trigger
-    let conditions = guardrails.check_all_conditions(&plan, 0.6, 1);
-    assert!(
-        !conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::LowScoreThreshold { .. })),
-        "Should not trigger for acceptable score"
-    );
-}
-
-#[test]
-fn test_guardrails_iteration_soft_limit() {
-    let config = GuardrailsConfig::default();
-    let guardrails = Guardrails::from_config(&config);
-
-    let plan = serde_json::json!({
-        "title": "Simple task",
-        "phases": []
-    });
-
-    // Iteration 6 should not trigger (default limit is 7)
-    let conditions = guardrails.check_all_conditions(&plan, 0.9, 6);
-    assert!(
-        !conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::IterationSoftLimit { .. })),
-        "Should not trigger before soft limit"
-    );
-
-    // Iteration 7 should trigger
-    let conditions = guardrails.check_all_conditions(&plan, 0.9, 7);
-    assert!(
-        conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::IterationSoftLimit { .. })),
-        "Should trigger at soft limit"
-    );
-}
-
-#[test]
-fn test_guardrails_data_deletion_detection() {
-    let config = GuardrailsConfig::default();
-    let guardrails = Guardrails::from_config(&config);
-
-    let plan = serde_json::json!({
-        "title": "Database cleanup",
-        "phases": [{
-            "name": "Cleanup",
-            "tasks": [{
-                "title": "Remove old data",
-                "description": "DROP TABLE old_users"
-            }]
-        }]
-    });
-
-    let conditions = guardrails.check_all_conditions(&plan, 0.9, 1);
-    assert!(
-        conditions
-            .iter()
-            .any(|c| matches!(c, MandatoryCondition::DataDeletionOperations { .. })),
-        "Should detect data deletion operations"
-    );
+    assert!(!guardrails.score_passes(0.3));
+    assert!(!guardrails.score_passes(0.49));
+    assert!(guardrails.score_passes(0.5));
+    assert!(guardrails.score_passes(0.9));
 }
 
 #[test]
@@ -207,6 +102,34 @@ fn test_guardrails_hard_stop_token_budget() {
     assert!(matches!(
         result,
         Err(GuardrailHardStop::TokenBudgetExhausted { .. })
+    ));
+}
+
+#[test]
+fn test_guardrails_hard_stop_max_tool_calls() {
+    let config = GuardrailsConfig {
+        max_tool_calls: 50,
+        ..Default::default()
+    };
+    let guardrails = Guardrails::from_config(&config);
+
+    let mut state = OrchestrationState::new(
+        "test-session".to_string(),
+        "Test task".to_string(),
+        PathBuf::from("/tmp"),
+        "test-task".to_string(),
+    );
+
+    // Within limit
+    state.tool_calls = 49;
+    assert!(guardrails.check_before_tool_call(&state).is_ok());
+
+    // At limit
+    state.tool_calls = 50;
+    let result = guardrails.check_before_tool_call(&state);
+    assert!(matches!(
+        result,
+        Err(GuardrailHardStop::MaxToolCallsExceeded { .. })
     ));
 }
 
@@ -278,7 +201,7 @@ fn test_orchestration_state_can_resume() {
     assert!(state.can_resume());
 
     // Paused state can resume
-    state.status = OrchestrationStatus::Paused { condition: None };
+    state.status = OrchestrationStatus::Paused { reason: "test".to_string() };
     assert!(state.can_resume());
 
     // Failed state can resume
@@ -462,23 +385,36 @@ async fn test_session_registry_concurrent_sessions() {
 #[test]
 fn test_human_input_record_creation() {
     let record = HumanInputRecord {
-        question: "Should we proceed with security changes?".to_string(),
+        question: "Security concern: Should we proceed?".to_string(),
         category: "security".to_string(),
         response: Some("Yes, approved".to_string()),
-        condition: Some(MandatoryCondition::SecuritySensitive {
-            keywords: vec!["api_key".to_string()],
-            locations: vec!["config.rs".to_string()],
-        }),
+        reason: Some("Potential security issue in plan".to_string()),
         iteration: 2,
         timestamp: "2024-01-01T00:00:00Z".to_string(),
         approved: true,
     };
 
-    assert_eq!(record.question, "Should we proceed with security changes?");
+    assert_eq!(record.question, "Security concern: Should we proceed?");
     assert_eq!(record.category, "security");
     assert!(record.response.is_some());
-    assert!(record.condition.is_some());
+    assert!(record.reason.is_some());
     assert!(record.approved);
+}
+
+#[test]
+fn test_human_input_record_with_reason() {
+    let record = HumanInputRecord {
+        question: "Requirements unclear. Continue?".to_string(),
+        category: "clarification".to_string(),
+        response: Some("Yes, continue with assumption X".to_string()),
+        reason: Some("clarification: Requirements unclear".to_string()),
+        iteration: 3,
+        timestamp: "2024-01-01T00:00:00Z".to_string(),
+        approved: true,
+    };
+
+    assert_eq!(record.category, "clarification");
+    assert_eq!(record.reason.as_deref(), Some("clarification: Requirements unclear"));
 }
 
 // ============================================================================
@@ -497,12 +433,9 @@ fn test_orchestration_status_transitions() {
     // Initial state is Running
     assert!(matches!(state.status, OrchestrationStatus::Running));
 
-    // Transition to Paused
+    // Transition to Paused (with reason from reviewer)
     state.status = OrchestrationStatus::Paused {
-        condition: Some(MandatoryCondition::SecuritySensitive {
-            keywords: vec!["password".to_string()],
-            locations: vec!["auth.rs".to_string()],
-        }),
+        reason: "security: Potential credential exposure".to_string(),
     };
     assert!(matches!(state.status, OrchestrationStatus::Paused { .. }));
     assert!(state.can_resume());
@@ -510,6 +443,10 @@ fn test_orchestration_status_transitions() {
     // Transition to Completed
     state.status = OrchestrationStatus::Completed;
     assert!(matches!(state.status, OrchestrationStatus::Completed));
+
+    // Transition to CompletedBestEffort
+    state.status = OrchestrationStatus::CompletedBestEffort;
+    assert!(matches!(state.status, OrchestrationStatus::CompletedBestEffort));
 
     // Transition to HardStopped (terminal)
     state.status = OrchestrationStatus::HardStopped {
@@ -520,4 +457,214 @@ fn test_orchestration_status_transitions() {
     };
     assert!(matches!(state.status, OrchestrationStatus::HardStopped { .. }));
     assert!(!state.can_resume());
+}
+
+#[test]
+fn test_orchestration_status_paused_with_reason() {
+    let mut state = OrchestrationState::new(
+        "test".to_string(),
+        "task".to_string(),
+        PathBuf::from("/tmp"),
+        "slug".to_string(),
+    );
+
+    // Pause due to reviewer flagging human input needed
+    state.status = OrchestrationStatus::Paused {
+        reason: "security: Plan includes credential handling".to_string(),
+    };
+
+    assert!(matches!(state.status, OrchestrationStatus::Paused { .. }));
+    assert!(state.can_resume());
+
+    if let OrchestrationStatus::Paused { reason } = &state.status {
+        assert!(reason.contains("security"));
+    } else {
+        panic!("Expected Paused status with reason");
+    }
+}
+
+// ============================================================================
+// ISA (Instruction Set Architecture) Tests
+// ============================================================================
+
+#[test]
+fn test_opcode_serialization() {
+    // Test that OpCodes serialize to SCREAMING_SNAKE_CASE
+    let ops = vec![
+        (OpCode::SearchSemantic, "\"SEARCH_SEMANTIC\""),
+        (OpCode::SearchCode, "\"SEARCH_CODE\""),
+        (OpCode::ReadFiles, "\"READ_FILES\""),
+        (OpCode::GetDependencies, "\"GET_DEPENDENCIES\""),
+        (OpCode::DefineTask, "\"DEFINE_TASK\""),
+        (OpCode::VerifyTask, "\"VERIFY_TASK\""),
+        (OpCode::EditCode, "\"EDIT_CODE\""),
+        (OpCode::RunCommand, "\"RUN_COMMAND\""),
+        (OpCode::GenerateTest, "\"GENERATE_TEST\""),
+        (OpCode::RunTest, "\"RUN_TEST\""),
+        (OpCode::VerifyExists, "\"VERIFY_EXISTS\""),
+    ];
+
+    for (op, expected) in ops {
+        let serialized = serde_json::to_string(&op).unwrap();
+        assert_eq!(serialized, expected, "OpCode {:?} should serialize to {}", op, expected);
+
+        // Verify roundtrip
+        let deserialized: OpCode = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, op, "OpCode roundtrip failed for {:?}", op);
+    }
+}
+
+#[test]
+fn test_instruction_model() {
+    let instruction = Instruction {
+        id: "step_1".to_string(),
+        op: OpCode::SearchCode,
+        params: serde_json::json!({
+            "query": "fn main",
+            "path": "src/"
+        }),
+        dependencies: vec![],
+        description: "Search for main function".to_string(),
+        ..Default::default()
+    };
+
+    // Test serialization
+    let json = serde_json::to_string(&instruction).unwrap();
+    assert!(json.contains("\"id\":\"step_1\""));
+    assert!(json.contains("\"op\":\"SEARCH_CODE\""));
+    assert!(json.contains("\"query\":\"fn main\""));
+
+    // Test deserialization
+    let parsed: Instruction = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.id, "step_1");
+    assert_eq!(parsed.op, OpCode::SearchCode);
+    assert_eq!(parsed.description, "Search for main function");
+    assert!(parsed.dependencies.is_empty());
+}
+
+#[test]
+fn test_instruction_with_dependencies() {
+    let instr1 = Instruction {
+        id: "locate_files".to_string(),
+        op: OpCode::SearchCode,
+        params: serde_json::json!({"query": "struct Plan"}),
+        dependencies: vec![],
+        description: "Find Plan struct".to_string(),
+        ..Default::default()
+    };
+
+    let instr2 = Instruction {
+        id: "read_context".to_string(),
+        op: OpCode::ReadFiles,
+        params: serde_json::json!({"paths": "${locate_files.output}"}),
+        dependencies: vec!["locate_files".to_string()],
+        description: "Read found files".to_string(),
+        ..Default::default()
+    };
+
+    // Verify dependency chain
+    assert!(instr1.dependencies.is_empty());
+    assert_eq!(instr2.dependencies, vec!["locate_files"]);
+
+    // Verify variable reference in params
+    let params_str = serde_json::to_string(&instr2.params).unwrap();
+    assert!(params_str.contains("${locate_files.output}"));
+}
+
+#[test]
+fn test_grounding_snapshot_default() {
+    let snapshot = GroundingSnapshot::default();
+
+    assert!(snapshot.verified_files.is_empty());
+    assert!(snapshot.verified_targets.is_empty());
+    assert!(snapshot.import_convention.is_none());
+    assert!(snapshot.existing_patterns.is_empty());
+}
+
+#[test]
+fn test_grounding_snapshot_with_data() {
+    let snapshot = GroundingSnapshot {
+        verified_files: vec![
+            VerifiedFile {
+                path: "src/lib.rs".to_string(),
+                exists: true,
+            },
+            VerifiedFile {
+                path: "src/missing.rs".to_string(),
+                exists: false,
+            },
+        ],
+        verified_targets: vec![VerifiedTarget {
+            target: "cargo test".to_string(),
+            resolves: true,
+        }],
+        import_convention: Some("use crate::module::Type".to_string()),
+        existing_patterns: vec![ExistingPattern {
+            pattern: "impl Default for".to_string(),
+            file: "src/models/plan.rs".to_string(),
+            line: 61,
+        }],
+    };
+
+    // Test serialization roundtrip
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let parsed: GroundingSnapshot = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.verified_files.len(), 2);
+    assert!(parsed.verified_files[0].exists);
+    assert!(!parsed.verified_files[1].exists);
+    assert_eq!(parsed.verified_targets.len(), 1);
+    assert!(parsed.verified_targets[0].resolves);
+    assert_eq!(
+        parsed.import_convention,
+        Some("use crate::module::Type".to_string())
+    );
+    assert_eq!(parsed.existing_patterns.len(), 1);
+    assert_eq!(parsed.existing_patterns[0].line, 61);
+}
+
+#[test]
+fn test_verified_file_serialization() {
+    let file = VerifiedFile {
+        path: "Cargo.toml".to_string(),
+        exists: true,
+    };
+
+    let json = serde_json::to_string(&file).unwrap();
+    assert!(json.contains("\"path\":\"Cargo.toml\""));
+    assert!(json.contains("\"exists\":true"));
+
+    let parsed: VerifiedFile = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.path, "Cargo.toml");
+    assert!(parsed.exists);
+}
+
+#[test]
+fn test_verified_target_serialization() {
+    let target = VerifiedTarget {
+        target: "cargo build --release".to_string(),
+        resolves: true,
+    };
+
+    let json = serde_json::to_string(&target).unwrap();
+    let parsed: VerifiedTarget = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.target, "cargo build --release");
+    assert!(parsed.resolves);
+}
+
+#[test]
+fn test_existing_pattern_serialization() {
+    let pattern = ExistingPattern {
+        pattern: "pub fn new(".to_string(),
+        file: "src/config/settings.rs".to_string(),
+        line: 42,
+    };
+
+    let json = serde_json::to_string(&pattern).unwrap();
+    let parsed: ExistingPattern = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.pattern, "pub fn new(");
+    assert_eq!(parsed.file, "src/config/settings.rs");
+    assert_eq!(parsed.line, 42);
 }

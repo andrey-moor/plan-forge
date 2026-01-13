@@ -258,30 +258,48 @@ Return ONLY the updated JSON plan.
         &self,
         task: &str,
         feedback: Option<&[String]>,
+        previous_plan: Option<&Value>,
         working_dir: Option<&str>,
     ) -> Result<(Value, TokenUsage)> {
         info!("Generating plan JSON for orchestrator");
 
         // Build prompt
         let prompt = if let Some(fb) = feedback {
+            // Build previous plan section if available for incremental updates
+            let previous_plan_section = if let Some(plan) = previous_plan {
+                format!(
+                    r#"
+## Previous Plan (make INCREMENTAL updates to this)
+```json
+{}
+```
+
+"#,
+                    serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string())
+                )
+            } else {
+                String::new()
+            };
+
             format!(
                 r#"Update the development plan based on review feedback.
 
 ## Task
 {}
-
-## Review Feedback to Address
+{}## Review Feedback to Address
 {}
 
 ## Requirements
-- Address ALL feedback items
-- Output the updated plan as a JSON object
+- Make TARGETED fixes to address the specific feedback items
+- Do NOT regenerate the entire plan - only modify what's needed
+- Preserve working parts of the plan unchanged
 - Increment the metadata.version and metadata.iteration
 - Update metadata.last_updated
 
 Return ONLY the JSON plan.
 "#,
                 task,
+                previous_plan_section,
                 fb.join("\n")
             )
         } else {

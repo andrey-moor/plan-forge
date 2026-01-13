@@ -79,11 +79,25 @@ The plan-forge MCP server exposes 5 tools:
 
 | Tool | Description |
 |------|-------------|
-| `plan_run` | Create or resume a planning session |
+| `plan_run` | Create or resume a planning session. Use `feedback` param when resuming paused sessions. |
 | `plan_status` | Get session status (ready/in_progress/needs_input/approved/max_turns) |
 | `plan_list` | List all planning sessions |
 | `plan_get` | Read plan, tasks, or context markdown files |
 | `plan_approve` | Force approve a plan and write to dev/active/ |
+
+### plan_run Parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `task` | Yes | Task description (for new) or empty string (for resume) |
+| `session_id` | No | Session ID to resume |
+| `feedback` | No | Natural language feedback for resuming paused sessions |
+| `reset_turns` | No | Reset iteration counter (default: false) |
+
+**Feedback examples:**
+- Answer questions: `"Use JWT with 24h expiry"`
+- Approve: `"Looks good, proceed"`
+- Request changes: `"Please revise to use PostgreSQL"`
 
 ## Slash Command: /plan
 

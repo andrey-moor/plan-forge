@@ -95,18 +95,11 @@ pub struct PlanRunParams {
     /// Use LLM-powered orchestrator instead of deterministic loop controller
     #[serde(default)]
     pub use_orchestrator: Option<bool>,
-    /// Human response for resuming paused orchestrator session
-    pub human_response: Option<HumanResponseParam>,
-}
-
-/// Human response parameters for resuming paused orchestrator sessions
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct HumanResponseParam {
-    /// The response text
-    pub response: String,
-    /// Whether the human approves continuing
-    #[serde(default)]
-    pub approved: bool,
+    /// Feedback for resuming paused sessions. Use natural language:
+    /// - Answer questions: "Use JWT with 24h expiry"
+    /// - Approve: "Looks good, proceed"
+    /// - Request changes: "Please revise to use PostgreSQL"
+    pub feedback: Option<String>,
 }
 
 /// Parameters for the plan_approve tool
@@ -441,12 +434,12 @@ impl PlanForgeServer {
         let session_id = params.0.session_id.clone();
         let reset_turns = params.0.reset_turns;
         let use_orchestrator = params.0.use_orchestrator.unwrap_or(self.config.use_orchestrator);
-        let human_response = params.0.human_response;
+        let feedback = params.0.feedback;
 
         // Check if orchestrator mode is enabled
         if use_orchestrator {
             return self
-                .run_orchestrator(task, session_id, human_response)
+                .run_orchestrator(task, session_id, feedback)
                 .await;
         }
 
@@ -499,11 +492,11 @@ impl PlanForgeServer {
                             return self.run_loop(sid, task, Some(resume), false).await;
                         }
                         // Orchestrator states - must be resumed with orchestrator
-                        SessionStatus::GuardrailTriggered { .. }
+                        SessionStatus::BestEffort
                         | SessionStatus::PausedForHumanInput { .. } => {
                             // These are orchestrator sessions - route to run_orchestrator
                             self.set_current_session(sid.clone());
-                            return self.run_orchestrator(task, Some(sid), human_response).await;
+                            return self.run_orchestrator(task, Some(sid), feedback).await;
                         }
                         // Approved = completed, fall through to create new session
                         SessionStatus::Approved => {}
@@ -842,7 +835,7 @@ impl PlanForgeServer {
         &self,
         task: String,
         session_id: Option<String>,
-        human_response: Option<HumanResponseParam>,
+        feedback: Option<String>,
     ) -> Result<CallToolResult, ErrorData> {
         // Generate slug for new sessions or use provided session_id
         let task_slug = if let Some(sid) = session_id.as_ref() {
@@ -878,10 +871,11 @@ impl PlanForgeServer {
             self.save_session_meta(&session_dir, &meta)?;
         }
 
-        // Convert human response if provided
-        let hr = human_response.map(|p| HumanResponse {
-            response: p.response,
-            approved: p.approved,
+        // Convert feedback string to HumanResponse
+        // Natural language in feedback handles approve/revise/answer semantics
+        let hr = feedback.map(|text| HumanResponse {
+            response: text,
+            approved: true, // Natural language in feedback handles intent
         });
 
         // Create orchestrator with shared session registry
@@ -904,6 +898,7 @@ impl PlanForgeServer {
                 // Determine status string
                 let status = match &result.status {
                     crate::orchestrator::OrchestrationStatus::Completed => "approved",
+                    crate::orchestrator::OrchestrationStatus::CompletedBestEffort => "best_effort",
                     crate::orchestrator::OrchestrationStatus::Running => "in_progress",
                     crate::orchestrator::OrchestrationStatus::Paused { .. } => "needs_input",
                     crate::orchestrator::OrchestrationStatus::HardStopped { .. } => "hard_stopped",
@@ -916,7 +911,7 @@ impl PlanForgeServer {
                     "iterations": result.iterations,
                     "tool_calls": result.tool_calls,
                     "total_tokens": result.total_tokens,
-                    "triggered_conditions": result.triggered_conditions,
+                    "best_score": result.best_score,
                     "has_plan": result.final_plan.is_some(),
                 });
 

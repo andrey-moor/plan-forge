@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::models::ReviewResult;
-use crate::orchestrator::{GuardrailHardStop, MandatoryCondition};
+use crate::orchestrator::GuardrailHardStop;
 
 /// Session status derived from files in .plan-forge/<session>/
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,13 +21,10 @@ pub enum SessionStatus {
     NeedsInput,
     /// Latest review passed (score >= threshold)
     Approved,
+    /// Completed with best effort (did not pass threshold)
+    BestEffort,
     /// Iteration count >= max without approval
     MaxTurns,
-    /// Orchestrator triggered a guardrail condition requiring human input
-    GuardrailTriggered {
-        /// The mandatory condition that was triggered
-        condition: MandatoryCondition,
-    },
     /// Orchestrator paused waiting for human input
     PausedForHumanInput {
         /// The question being asked
@@ -49,8 +46,8 @@ impl std::fmt::Display for SessionStatus {
             SessionStatus::InProgress => write!(f, "in_progress"),
             SessionStatus::NeedsInput => write!(f, "needs_input"),
             SessionStatus::Approved => write!(f, "approved"),
+            SessionStatus::BestEffort => write!(f, "best_effort"),
             SessionStatus::MaxTurns => write!(f, "max_turns"),
-            SessionStatus::GuardrailTriggered { .. } => write!(f, "guardrail_triggered"),
             SessionStatus::PausedForHumanInput { .. } => write!(f, "paused_for_human_input"),
             SessionStatus::HardStopped { .. } => write!(f, "hard_stopped"),
         }
@@ -70,13 +67,13 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     /// Latest review score (if available)
     pub latest_score: Option<f32>,
+    /// Best review score seen (for orchestrator sessions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_score: Option<f32>,
     /// Human input reason (if status is NeedsInput)
     pub input_reason: Option<String>,
     /// Plan title (if available)
     pub title: Option<String>,
-    /// Triggered mandatory condition (for orchestrator sessions)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub triggered_condition: Option<MandatoryCondition>,
     /// Total tokens consumed (for orchestrator sessions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
@@ -86,9 +83,6 @@ pub struct SessionInfo {
     /// Token budget remaining (for orchestrator sessions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_budget_remaining: Option<u64>,
-    /// All triggered conditions during session (for orchestrator sessions)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub triggered_conditions: Option<Vec<MandatoryCondition>>,
     /// Pending human input request (for orchestrator sessions)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_human_input: Option<PendingHumanInput>,
@@ -101,9 +95,9 @@ pub struct PendingHumanInput {
     pub question: String,
     /// Category of the input request
     pub category: String,
-    /// Condition that triggered the request (if any)
+    /// Reason for the request
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub condition: Option<MandatoryCondition>,
+    pub reason: Option<String>,
 }
 
 /// Derive session status from files in a session directory.
@@ -145,38 +139,20 @@ fn derive_orchestrator_status(
 ) -> anyhow::Result<SessionInfo> {
     use crate::orchestrator::OrchestrationStatus;
 
-    let (status, triggered_condition): (SessionStatus, Option<MandatoryCondition>) =
-        match &state.status {
-            OrchestrationStatus::Running => (SessionStatus::InProgress, None),
-            OrchestrationStatus::Completed => (SessionStatus::Approved, None),
-            OrchestrationStatus::Paused { condition } => {
-                if let Some(cond) = condition {
-                    (
-                        SessionStatus::GuardrailTriggered {
-                            condition: cond.clone(),
-                        },
-                        Some(cond.clone()),
-                    )
-                } else {
-                    // Paused without a specific condition
-                    (SessionStatus::NeedsInput, None)
-                }
-            }
-            OrchestrationStatus::Failed { error } => (
-                SessionStatus::HardStopped {
-                    reason: GuardrailHardStop::ExecutionError {
-                        message: error.clone(),
-                    },
-                },
-                None,
-            ),
-            OrchestrationStatus::HardStopped { reason } => (
-                SessionStatus::HardStopped {
-                    reason: reason.clone(),
-                },
-                None,
-            ),
-        };
+    let status = match &state.status {
+        OrchestrationStatus::Running => SessionStatus::InProgress,
+        OrchestrationStatus::Completed => SessionStatus::Approved,
+        OrchestrationStatus::CompletedBestEffort => SessionStatus::BestEffort,
+        OrchestrationStatus::Paused { reason: _ } => SessionStatus::NeedsInput,
+        OrchestrationStatus::Failed { error } => SessionStatus::HardStopped {
+            reason: GuardrailHardStop::ExecutionError {
+                message: error.clone(),
+            },
+        },
+        OrchestrationStatus::HardStopped { reason } => SessionStatus::HardStopped {
+            reason: reason.clone(),
+        },
+    };
 
     // Check for pending human input
     let (final_status, input_reason) = if let Some(pending) = &state.pending_human_input {
@@ -207,7 +183,7 @@ fn derive_orchestrator_status(
     let pending_human_input = state.pending_human_input.as_ref().map(|p| PendingHumanInput {
         question: p.question.clone(),
         category: p.category.clone(),
-        condition: p.condition.clone(),
+        reason: p.reason.clone(),
     });
 
     Ok(SessionInfo {
@@ -215,18 +191,13 @@ fn derive_orchestrator_status(
         session_dir: session_dir.to_path_buf(),
         iteration: state.iteration,
         status: final_status,
-        latest_score: None, // Orchestrator doesn't track score the same way
+        latest_score: None,
+        best_score: if state.best_score > 0.0 { Some(state.best_score) } else { None },
         input_reason,
         title,
-        triggered_condition,
         total_tokens: Some(state.total_tokens),
         tool_calls: Some(state.tool_calls),
         token_budget_remaining: Some(token_budget_remaining),
-        triggered_conditions: if state.triggered_conditions.is_empty() {
-            None
-        } else {
-            Some(state.triggered_conditions.clone())
-        },
         pending_human_input,
     })
 }
@@ -249,13 +220,12 @@ fn derive_legacy_status(
             iteration: 0,
             status: SessionStatus::Ready,
             latest_score: None,
+            best_score: None,
             input_reason: None,
             title: None,
-            triggered_condition: None,
             total_tokens: None,
             tool_calls: None,
             token_budget_remaining: None,
-            triggered_conditions: None,
             pending_human_input: None,
         });
     }
@@ -291,13 +261,12 @@ fn derive_legacy_status(
         iteration: plan_iteration.max(review_iteration),
         status,
         latest_score,
+        best_score: None,
         input_reason,
         title,
-        triggered_condition: None,
         total_tokens: None,
         tool_calls: None,
         token_budget_remaining: None,
-        triggered_conditions: None,
         pending_human_input: None,
     })
 }

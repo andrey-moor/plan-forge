@@ -21,11 +21,11 @@ use goose::session::{session_manager::SessionType, SessionManager};
 
 use crate::config::{GuardrailsConfig, OrchestratorConfig, OutputConfig};
 use crate::models::Plan;
-use crate::output::{FileOutputWriter, OutputWriter};
+use crate::output::FileOutputWriter;
 use crate::orchestrator::{
     create_orchestrator_client, register_orchestrator_extension, GuardrailHardStop, Guardrails,
-    HumanResponse, MandatoryCondition, OrchestrationState, OrchestrationStatus, SessionRegistry,
-    TokenBreakdown,
+    HumanResponse, IterationOutcome, IterationRecord, OrchestrationState,
+    OrchestrationStatus, SessionRegistry, TokenBreakdown,
 };
 use crate::phases::{GoosePlanner, GooseReviewer};
 use crate::recipes::load_recipe;
@@ -38,6 +38,10 @@ use crate::recipes::load_recipe;
 pub struct OrchestrationResult {
     /// Final plan JSON (if generated)
     pub final_plan: Option<Value>,
+    /// Best plan seen during session (highest score)
+    pub best_plan: Option<Value>,
+    /// Best review score achieved
+    pub best_score: f32,
     /// Final status of the session
     pub status: OrchestrationStatus,
     /// Number of iterations completed
@@ -46,8 +50,6 @@ pub struct OrchestrationResult {
     pub tool_calls: u32,
     /// Total tokens consumed
     pub total_tokens: u64,
-    /// Triggered mandatory conditions
-    pub triggered_conditions: Vec<MandatoryCondition>,
     /// Session ID for resume
     pub session_id: String,
     /// Token usage breakdown by component
@@ -162,11 +164,22 @@ impl GooseOrchestrator {
         // Create shared components
         let guardrails = Arc::new(Guardrails::from_config(&self.guardrails_config));
 
+        // Get planner/reviewer provider/model from environment variables
+        // This allows orchestrator mode to use the same configuration as CLI
+        let planner_provider = std::env::var("PLAN_FORGE_PLANNER_PROVIDER").ok();
+        let planner_model = std::env::var("PLAN_FORGE_PLANNER_MODEL").ok();
+        let reviewer_provider = std::env::var("PLAN_FORGE_REVIEWER_PROVIDER").ok();
+        let reviewer_model = std::env::var("PLAN_FORGE_REVIEWER_MODEL").ok();
+        let pass_threshold: f32 = std::env::var("PLAN_FORGE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.8);
+
         let planner = Arc::new(GoosePlanner::new(
             crate::config::PlanningConfig {
                 recipe: PathBuf::from("recipes/planner.yaml"),
-                provider_override: None,
-                model_override: None,
+                provider_override: planner_provider,
+                model_override: planner_model,
             },
             self.base_dir.clone(),
         ));
@@ -174,9 +187,9 @@ impl GooseOrchestrator {
         let reviewer = Arc::new(GooseReviewer::new(
             crate::config::ReviewConfig {
                 recipe: PathBuf::from("recipes/reviewer.yaml"),
-                provider_override: None,
-                model_override: None,
-                pass_threshold: 0.8,
+                provider_override: reviewer_provider,
+                model_override: reviewer_model,
+                pass_threshold,
             },
             self.base_dir.clone(),
         ));
@@ -220,7 +233,7 @@ impl GooseOrchestrator {
                     question: pending.question,
                     category: pending.category,
                     response: Some(hr.response.clone()),
-                    condition: pending.condition.clone(),
+                    reason: pending.reason.clone(),
                     iteration: state.iteration,
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     approved: hr.approved,
@@ -238,150 +251,208 @@ impl GooseOrchestrator {
             }
         }
 
-        // Load orchestrator recipe
+        // Load orchestrator recipe and create provider (shared across iterations)
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "orchestrator")?;
-
-        // Create provider and agent
         let provider = self.create_provider(&recipe).await?;
-        let agent = Agent::new();
-
-        // Create session for the orchestrator agent
-        let orchestrator_session = SessionManager::create_session(
-            working_dir_path.clone(),
-            format!("orchestrator-{}", chrono::Utc::now().timestamp()),
-            SessionType::Hidden,
-        )
-        .await
-        .context("Failed to create orchestrator session")?;
-
-        let orchestrator_session_id = orchestrator_session.id.clone();
-        agent.update_provider(provider, &orchestrator_session_id).await?;
-
-        // Apply recipe instructions
-        if let Some(instructions) = &recipe.instructions {
-            agent.override_system_prompt(instructions.clone()).await;
-        }
-
-        // CRITICAL: Create and register the orchestrator extension BEFORE agent.reply()
-        let orchestrator_client = create_orchestrator_client(
-            session_id.clone(),
-            session_state.clone(),
-            guardrails.clone(),
-            planner,
-            reviewer,
-        );
-
-        register_orchestrator_extension(&agent.extension_manager, orchestrator_client).await;
-
-        info!("Orchestrator extension registered with agent");
-
-        // Build the initial prompt
-        let prompt = self.build_prompt(&task, &session_state).await;
-
-        let session_config = SessionConfig {
-            id: orchestrator_session_id.clone(),
-            schedule_id: None,
-            max_turns: Some(200), // Allow many turns for orchestrator
-            retry_config: None,
-        };
-
-        let user_message = Message::user().with_text(&prompt);
 
         // Run agent with timeout
         let timeout_duration =
             Duration::from_secs(self.guardrails_config.execution_timeout_secs);
+        let max_iterations = self.guardrails_config.max_iterations;
 
-        let stream_result = tokio::time::timeout(
-            timeout_duration,
-            agent.reply(user_message, session_config, None),
-        )
-        .await;
+        // Track sessions created for token accounting
+        let mut iteration_sessions: Vec<String> = Vec::new();
 
-        let mut stream = match stream_result {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                // Agent error - save state and return
+        // Stateless iteration loop: create fresh agent per iteration
+        loop {
+            // 1. Check iteration limit BEFORE creating agent
+            let current_iteration = {
+                let state = session_state.lock().await;
+                state.iteration
+            };
+
+            if current_iteration >= max_iterations {
                 let mut state = session_state.lock().await;
-                state.status = OrchestrationStatus::Failed {
-                    error: format!("Agent error: {}", e),
-                };
-                state.save(&session_dir)?;
-                return Err(e.into());
-            }
-            Err(_) => {
-                // Timeout - save state with hard stop
-                let mut state = session_state.lock().await;
+                warn!(
+                    "Max iterations ({}) reached without completion",
+                    max_iterations
+                );
                 state.status = OrchestrationStatus::HardStopped {
-                    reason: GuardrailHardStop::ExecutionTimeout,
+                    reason: GuardrailHardStop::MaxIterationsExceeded {
+                        iteration: current_iteration,
+                        limit: max_iterations,
+                    },
                 };
-                state.save(&session_dir)?;
-                return Err(anyhow::anyhow!("Orchestrator execution timeout"));
+                break;
             }
-        };
 
-        // Process the agent stream, parsing tool responses for status detection
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(AgentEvent::Message(msg)) => {
-                    // Parse tool responses for terminal state detection
-                    for content in &msg.content {
-                        match content {
-                            MessageContent::ToolResponse(response) => {
-                                // Try to parse the tool result to detect terminal states
-                                if let Ok(result) = &response.tool_result {
-                                    if let Some(content) = result.content.first() {
-                                        if let Some(text) = content.raw.as_text() {
-                                            // Parse JSON to detect status
-                                            if let Ok(json) = serde_json::from_str::<Value>(&text.text) {
-                                                // Detect request_human_input response
-                                                if json.get("status").and_then(|s| s.as_str()) == Some("paused") {
-                                                    debug!("Detected paused status from tool response");
-                                                }
-                                                // Detect finalize response
-                                                if json.get("success").and_then(|s| s.as_bool()) == Some(true) {
-                                                    debug!("Detected successful finalization");
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            MessageContent::Text(text) => {
-                                debug!("Orchestrator: {}", text.text.chars().take(200).collect::<String>());
-                            }
-                            _ => {}
-                        }
-                    }
+            // 2. Create FRESH agent for this iteration
+            let agent = Agent::new();
+            let iteration_session = SessionManager::create_session(
+                working_dir_path.clone(),
+                format!("orchestrator-iter-{}", current_iteration),
+                SessionType::Hidden,
+            )
+            .await
+            .context("Failed to create orchestrator iteration session")?;
+
+            let iteration_session_id = iteration_session.id.clone();
+            iteration_sessions.push(iteration_session_id.clone());
+
+            // Apply provider and recipe instructions
+            agent
+                .update_provider(provider.clone(), &iteration_session_id)
+                .await?;
+            if let Some(instructions) = &recipe.instructions {
+                agent.override_system_prompt(instructions.clone()).await;
+            }
+
+            // Register orchestrator extension for this fresh agent
+            let orchestrator_client = create_orchestrator_client(
+                session_id.clone(),
+                session_dir.clone(),
+                session_state.clone(),
+                guardrails.clone(),
+                planner.clone(),
+                reviewer.clone(),
+            );
+            register_orchestrator_extension(&agent.extension_manager, orchestrator_client).await;
+
+            info!(
+                "Iteration {}: Created fresh agent with session {}",
+                current_iteration, iteration_session_id
+            );
+
+            // 3. Build EXPLICIT context message (no conversation history dependency)
+            let context_message = self
+                .build_iteration_context(&task, &session_state, max_iterations)
+                .await;
+            let user_message = Message::user().with_text(&context_message);
+
+            let session_config = SessionConfig {
+                id: iteration_session_id.clone(),
+                schedule_id: None,
+                max_turns: Some(50), // Fewer turns per iteration (single decision)
+                retry_config: None,
+            };
+
+            // 4. Run agent ONCE for this iteration
+            let stream_result = tokio::time::timeout(
+                timeout_duration,
+                agent.reply(user_message, session_config, None),
+            )
+            .await;
+
+            let stream = match stream_result {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    // Agent error - save state and return
+                    let mut state = session_state.lock().await;
+                    state.status = OrchestrationStatus::Failed {
+                        error: format!("Agent error: {}", e),
+                    };
+                    state.save(&session_dir)?;
+                    return Err(e.into());
                 }
-                Ok(_) => {
-                    // Other events (McpNotification, ModelChange, HistoryReplaced)
+                Err(_) => {
+                    // Timeout - save state with hard stop
+                    let mut state = session_state.lock().await;
+                    state.status = OrchestrationStatus::HardStopped {
+                        reason: GuardrailHardStop::ExecutionTimeout,
+                    };
+                    state.save(&session_dir)?;
+                    return Err(anyhow::anyhow!("Orchestrator execution timeout"));
                 }
-                Err(e) => {
-                    warn!("Orchestrator stream error: {:?}", e);
+            };
+
+            // 5. Process stream (tools update shared state via OrchestratorClient)
+            let got_tool_call = self.process_agent_stream(stream).await?;
+
+            // Track tokens from this iteration's session
+            if let Ok(sess) = SessionManager::get_session(&iteration_session_id, false).await {
+                let mut state = session_state.lock().await;
+                state.add_tokens(
+                    sess.accumulated_input_tokens,
+                    sess.accumulated_output_tokens,
+                );
+
+                let input = sess
+                    .accumulated_input_tokens
+                    .map(|t| t.max(0) as u64)
+                    .unwrap_or(0);
+                let output = sess
+                    .accumulated_output_tokens
+                    .map(|t| t.max(0) as u64)
+                    .unwrap_or(0);
+                state.token_breakdown.add_orchestrator(input, output);
+            }
+
+            // 6. DETERMINISTIC FINALIZATION: Force completion when review passed
+            // This is critical because the LLM may not always call finalize even when instructed to.
+            // We enforce this deterministically to prevent wasted iterations after a passing review.
+            {
+                let mut state = session_state.lock().await;
+                if state.last_review_passed && !state.requires_human_input_pending {
+                    info!(
+                        "Review passed (score passed threshold) - forcing completion (deterministic finalization)"
+                    );
+                    state.status = OrchestrationStatus::Completed;
                 }
             }
+
+            // 7. Check terminal state
+            let is_terminal = {
+                let state = session_state.lock().await;
+                matches!(
+                    state.status,
+                    OrchestrationStatus::Completed
+                        | OrchestrationStatus::Paused { .. }
+                        | OrchestrationStatus::HardStopped { .. }
+                        | OrchestrationStatus::Failed { .. }
+                )
+            };
+
+            if is_terminal {
+                info!("Orchestrator reached terminal state");
+                break;
+            }
+
+            // Handle text-only response (no tool calls) - record and continue
+            // With stateless iteration, we simply try again with fresh context
+            if !got_tool_call {
+                let mut state = session_state.lock().await;
+                warn!(
+                    "Iteration {}: No tool calls made, will retry with fresh context",
+                    current_iteration
+                );
+                let record = IterationRecord {
+                    iteration: state.iteration,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    viability_violations: 0,
+                    viability_critical: 0,
+                    viability_passed: false,
+                    review_score: None,
+                    review_passed: None,
+                    tool_calls_this_iteration: 0,
+                    tokens_this_iteration: 0,
+                    outcome: IterationOutcome::TextResponseDetected,
+                };
+                state.iteration_history.push(record);
+                state.iteration += 1; // Increment to avoid infinite loop
+            }
+
+            // No continuation prompt needed - next iteration creates fresh agent with full context
         }
 
-        // Get token usage from orchestrator session and track in breakdown
-        if let Ok(sess) = SessionManager::get_session(&orchestrator_session_id, false).await {
-            let mut state = session_state.lock().await;
-
-            // Check if token tracking is available
-            let estimated = sess.accumulated_input_tokens.is_none() && sess.accumulated_output_tokens.is_none();
-            if estimated {
+        // Token tracking now happens per-iteration inside the loop
+        // Check if we got any token data (for warning about estimation)
+        {
+            let state = session_state.lock().await;
+            if state.token_breakdown.estimated {
                 warn!(
                     "Token tracking not available from provider - budget enforcement may be inaccurate"
                 );
-                state.token_breakdown.estimated = true;
             }
-
-            // Add to total tokens
-            state.add_tokens(sess.accumulated_input_tokens, sess.accumulated_output_tokens);
-
-            // Track orchestrator tokens in breakdown
-            let input = sess.accumulated_input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
-            let output = sess.accumulated_output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
-            state.token_breakdown.add_orchestrator(input, output);
         }
 
         // Read final state and save
@@ -391,9 +462,26 @@ impl GooseOrchestrator {
         };
         final_state.save(&session_dir)?;
 
-        // Write final output to dev/active/ if plan was completed
-        if matches!(final_state.status, OrchestrationStatus::Completed) {
-            if let Some(plan_json) = &final_state.current_plan {
+        // Write plan to dev/active/ for completed, best-effort, and paused states
+        // - Completed: Final approved plan (passed review)
+        // - CompletedBestEffort: Best plan seen (did not pass review threshold)
+        // - Paused: Draft plan for user review before providing feedback
+        let should_write_plan = matches!(
+            final_state.status,
+            OrchestrationStatus::Completed
+                | OrchestrationStatus::CompletedBestEffort
+                | OrchestrationStatus::Paused { .. }
+        );
+
+        if should_write_plan {
+            // Use best_plan for CompletedBestEffort, otherwise current_plan
+            let plan_to_write = if matches!(final_state.status, OrchestrationStatus::CompletedBestEffort) {
+                final_state.best_plan.as_ref().or(final_state.current_plan.as_ref())
+            } else {
+                final_state.current_plan.as_ref()
+            };
+
+            if let Some(plan_json) = plan_to_write {
                 match serde_json::from_value::<Plan>(plan_json.clone()) {
                     Ok(plan) => {
                         let output_config = OutputConfig {
@@ -403,8 +491,18 @@ impl GooseOrchestrator {
                         };
                         let output = FileOutputWriter::new(output_config);
 
-                        if let Err(e) = output.write_final(&plan).await {
-                            warn!("Failed to write final output to dev/active/: {}", e);
+                        // Determine status for output
+                        let output_status = match &final_state.status {
+                            OrchestrationStatus::Completed => crate::output::PlanStatus::Approved,
+                            OrchestrationStatus::CompletedBestEffort => crate::output::PlanStatus::BestEffort {
+                                score: final_state.best_score,
+                            },
+                            OrchestrationStatus::Paused { .. } => crate::output::PlanStatus::Draft,
+                            _ => crate::output::PlanStatus::Draft,
+                        };
+
+                        if let Err(e) = output.write_final_with_plan_status(&plan, output_status).await {
+                            warn!("Failed to write plan to dev/active/: {}", e);
                         }
                     }
                     Err(e) => {
@@ -430,77 +528,177 @@ impl GooseOrchestrator {
 
         Ok(OrchestrationResult {
             final_plan: final_state.current_plan,
+            best_plan: final_state.best_plan,
+            best_score: final_state.best_score,
             status: final_state.status,
             iterations: final_state.iteration,
             tool_calls: final_state.tool_calls,
             total_tokens: final_state.total_tokens,
-            triggered_conditions: final_state.triggered_conditions,
             session_id,
             token_breakdown: final_state.token_breakdown,
         })
     }
 
-    /// Build the initial prompt for the orchestrator agent.
-    async fn build_prompt(
+    /// Build comprehensive context message for a single orchestrator iteration.
+    ///
+    /// This function creates an explicit context message that includes all information
+    /// the orchestrator needs to make a decision, without relying on conversation history.
+    /// This enables stateless per-iteration operation where each iteration runs with a
+    /// fresh agent.
+    async fn build_iteration_context(
         &self,
         task: &str,
         session_state: &tokio::sync::Mutex<OrchestrationState>,
+        max_iterations: u32,
     ) -> String {
         let state = session_state.lock().await;
 
-        if matches!(state.status, OrchestrationStatus::Paused { .. }) {
-            // Resume prompt
-            let last_input = state.human_inputs.last();
+        // Build iteration history summary (last 5 iterations)
+        let iteration_history = if state.iteration_history.is_empty() {
+            "(no previous iterations)".to_string()
+        } else {
+            state
+                .iteration_history
+                .iter()
+                .rev()
+                .take(5)
+                .map(|r| {
+                    format!(
+                        "- Iter {}: score={}, viability={}, outcome={:?}",
+                        r.iteration,
+                        r.review_score
+                            .map(|s| format!("{:.2}", s))
+                            .unwrap_or_else(|| "-".to_string()),
+                        if r.viability_passed { "pass" } else { "fail" },
+                        r.outcome
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Get last review summary
+        let last_review_summary = state
+            .reviews
+            .last()
+            .map(|r| {
+                // Extract key fields for a concise summary
+                let passed = r.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+                let requires_human = r
+                    .get("requires_human_input")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let summary = r
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no summary)");
+
+                format!(
+                    "Passed: {}\nRequires human input: {}\nSummary: {}",
+                    passed, requires_human, summary
+                )
+            })
+            .unwrap_or_else(|| "(no previous review)".to_string());
+
+        // Check if resuming from human input
+        let human_input_context = if let Some(last_input) = state.human_inputs.last() {
             format!(
-                r#"Resuming orchestration session.
-
-## Original Task
-{}
-
-## Session Context
-{}
-
-## Human Input Received
-{}
-
-Please continue the planning workflow from where you left off.
-If the human approved, you may proceed to finalize if the plan passes review.
-If not approved, incorporate the feedback and regenerate the plan."#,
-                task,
-                state.context_summary,
-                last_input
-                    .map(|i| {
-                        format!(
-                            "Question: {}\nResponse: {}\nApproved: {}",
-                            i.question,
-                            i.response.as_deref().unwrap_or("(none)"),
-                            i.approved
-                        )
-                    })
-                    .unwrap_or_else(|| "(no prior input)".to_string())
+                "\n## Human Input Received\nQuestion: {}\nResponse: {}\nApproved: {}",
+                last_input.question,
+                last_input.response.as_deref().unwrap_or("(none)"),
+                last_input.approved
             )
         } else {
-            // Initial prompt
-            format!(
-                r#"You are the Plan-Forge orchestrator. Generate a comprehensive development plan for the following task.
+            String::new()
+        };
 
-## Task
-{}
+        // Check for pending human input
+        let pending_context = if state.pending_human_input.is_some() {
+            "\n## Note\nThere is a pending human input request. If you just received human input, proceed based on their response."
+        } else {
+            ""
+        };
+
+        format!(
+            r#"## Task
+{task}
+
+## Current State
+Iteration: {iteration}/{max_iterations}
+Tokens used: {tokens}
+Tool calls: {tool_calls}
+Status: {status:?}
+Needs review: {needs_review}
+{human_input_context}{pending_context}
+
+## Iteration History (recent)
+{iteration_history}
+
+## Last Review Result
+{last_review_summary}
 
 ## Instructions
-1. First, call plan-forge-orchestrator__check_limits to verify your token budget.
-2. Call plan-forge-orchestrator__generate_plan with the task to create an initial plan.
-3. Call plan-forge-orchestrator__review_plan to evaluate the plan.
-4. Based on the review:
-   - If passed=true and requires_human_input=false, call plan-forge-orchestrator__finalize
-   - If requires_human_input=true, call plan-forge-orchestrator__request_human_input
-   - If passed=false, incorporate feedback and regenerate
-5. Repeat until finalized or a stopping condition is reached.
+Based on the above context, take the appropriate action (check IN ORDER):
+1. If iteration is 0 and no plan exists: call `plan-forge-orchestrator__generate_plan` with the task
+2. If needs_review=true: call `plan-forge-orchestrator__review_plan` with the current plan (REQUIRED after every generate_plan)
+3. If last review passed=true and requires_human_input=false: call `plan-forge-orchestrator__finalize`
+4. If requires_human_input=true: call `plan-forge-orchestrator__request_human_input`
+5. If last review passed=false: call `plan-forge-orchestrator__generate_plan` with feedback from the review
 
-Begin by checking your limits, then generate the initial plan."#,
-                task
-            )
+IMPORTANT: Respond ONLY with tool calls. Make your decision now."#,
+            task = task,
+            iteration = state.iteration,
+            max_iterations = max_iterations,
+            tokens = state.total_tokens,
+            tool_calls = state.tool_calls,
+            status = state.status,
+            needs_review = state.needs_review,
+            human_input_context = human_input_context,
+            pending_context = pending_context,
+            iteration_history = iteration_history,
+            last_review_summary = last_review_summary,
+        )
+    }
+
+    /// Process the agent event stream for a single iteration.
+    ///
+    /// Returns whether any tool calls were made during this iteration.
+    /// Tool responses are handled by the OrchestratorClient extension.
+    async fn process_agent_stream<S, E>(&self, mut stream: S) -> Result<bool>
+    where
+        S: futures::Stream<Item = Result<AgentEvent, E>> + Unpin,
+        E: std::fmt::Debug,
+    {
+        let mut got_tool_call = false;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(AgentEvent::Message(msg)) => {
+                    for content in &msg.content {
+                        match content {
+                            MessageContent::ToolResponse(_) | MessageContent::ToolRequest(_) => {
+                                got_tool_call = true;
+                            }
+                            MessageContent::Text(text) => {
+                                debug!(
+                                    "Orchestrator: {}",
+                                    text.text.chars().take(200).collect::<String>()
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Other events (McpNotification, ModelChange, HistoryReplaced)
+                }
+                Err(e) => {
+                    warn!("Stream error: {:?}", e);
+                }
+            }
         }
+
+        Ok(got_tool_call)
     }
 }
 
@@ -538,6 +736,12 @@ impl From<OrchestrationResult> for LoopResult {
                         .and_then(|v| v.as_str())
                         .unwrap_or("Plan generated via orchestrator")
                         .to_string(),
+                    goal: result
+                        .final_plan
+                        .as_ref()
+                        .and_then(|v| v.get("goal"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     tier: PlanTier::Standard,
                     context: PlanContext {
                         problem_statement: String::new(),
@@ -555,6 +759,12 @@ impl From<OrchestrationResult> for LoopResult {
                         last_updated: now,
                         iteration: result.iterations,
                     },
+                    // ISA fields (optional)
+                    reasoning: None,
+                    operator_runbook: None,
+                    grounding_gates: None,
+                    grounding_snapshot: None,
+                    instructions: None,
                 }
             });
 
@@ -584,7 +794,7 @@ impl From<OrchestrationResult> for LoopResult {
             total_iterations: result.iterations,
             final_review,
             success: matches!(result.status, OrchestrationStatus::Completed),
-            triggered_conditions: Some(result.triggered_conditions),
+            best_score: Some(result.best_score),
             total_tokens: Some(result.total_tokens),
         }
     }

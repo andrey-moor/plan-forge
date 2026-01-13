@@ -5,9 +5,11 @@
 //! via ExtensionManager::add_client() and prefixed as 'plan-forge-orchestrator__<tool_name>'.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tracing::info;
 use async_trait::async_trait;
 use rmcp::model::{
     CallToolResult, Content, GetPromptResult, Implementation, InitializeResult, JsonObject,
@@ -29,7 +31,11 @@ use goose::agents::extension::ExtensionConfig;
 use goose::agents::extension_manager::ExtensionManager;
 
 use super::guardrails::Guardrails;
-use super::orchestration_state::{HumanInputRecord, OrchestrationState, OrchestrationStatus};
+use super::orchestration_state::{
+    HumanInputRecord, IterationOutcome, IterationRecord, OrchestrationState, OrchestrationStatus,
+};
+use super::viability::{ViabilityChecker, ViabilitySeverity};
+use crate::models::Plan;
 use crate::phases::{GoosePlanner, GooseReviewer};
 
 /// Extension name used for tool prefixing (tools become plan-forge-orchestrator__<name>)
@@ -170,6 +176,8 @@ pub struct FinalizeInput {
 pub struct OrchestratorClient {
     /// Session identifier
     pub session_id: String,
+    /// Session directory for state persistence
+    session_dir: PathBuf,
     /// Session-scoped state (shared with GooseOrchestrator)
     state: Arc<Mutex<OrchestrationState>>,
     /// Guardrails for enforcing hard limits
@@ -186,6 +194,7 @@ impl OrchestratorClient {
     /// Create a new OrchestratorClient for a specific session.
     pub fn new(
         session_id: String,
+        session_dir: PathBuf,
         state: Arc<Mutex<OrchestrationState>>,
         guardrails: Arc<Guardrails>,
         planner: Arc<GoosePlanner>,
@@ -217,11 +226,20 @@ impl OrchestratorClient {
 
         Self {
             session_id,
+            session_dir,
             state,
             guardrails,
             planner,
             reviewer,
             info,
+        }
+    }
+
+    /// Save current state to disk. Called after every tool operation.
+    async fn persist_state(&self) {
+        let state = self.state.lock().await;
+        if let Err(e) = state.save(&self.session_dir) {
+            tracing::warn!("Failed to persist state: {}", e);
         }
     }
 
@@ -290,8 +308,12 @@ impl OrchestratorClient {
     async fn handle_generate_plan(&self, arguments: Option<JsonObject>) -> CallToolResult {
         // 1. Check limits BEFORE any work (short lock)
         {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             if let Err(hard_stop) = self.guardrails.check_before_tool_call(&state) {
+                // Update state to HardStopped before returning error
+                state.status = OrchestrationStatus::HardStopped {
+                    reason: hard_stop.clone(),
+                };
                 return CallToolResult::error(vec![Content::text(format!(
                     "Hard stop: {:?}",
                     hard_stop
@@ -316,12 +338,13 @@ impl OrchestratorClient {
         };
 
         // 3. Read current state for context (short lock)
-        let (iteration, working_dir, task) = {
+        let (iteration, working_dir, task, current_plan) = {
             let state = self.state.lock().await;
             (
                 state.iteration,
                 state.working_dir.clone(),
                 state.task.clone(),
+                state.current_plan.clone(),
             )
         }; // lock released
 
@@ -334,7 +357,12 @@ impl OrchestratorClient {
 
         let (plan_json, token_usage) = match self
             .planner
-            .generate_plan_json(&task_str, input.feedback.as_deref(), working_dir.to_str())
+            .generate_plan_json(
+                &task_str,
+                input.feedback.as_deref(),
+                current_plan.as_ref(),
+                working_dir.to_str(),
+            )
             .await
         {
             Ok(v) => v,
@@ -354,6 +382,9 @@ impl OrchestratorClient {
             state.tool_calls += 1;
             state.add_tokens(token_usage.input_tokens, token_usage.output_tokens);
 
+            // Mark that this new plan needs to be reviewed
+            state.needs_review = true;
+
             // Track planner tokens in breakdown
             let input = token_usage.input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
             let output = token_usage.output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
@@ -363,17 +394,32 @@ impl OrchestratorClient {
             state.context_summary = state.generate_context_summary();
         } // lock released
 
+        // Persist state after plan generation
+        self.persist_state().await;
+
+        // Return plan without validation - all checks happen in review_plan
+        let response = serde_json::json!({
+            "plan": plan_json,
+            "tokens_used": token_usage.input_tokens.unwrap_or(0) + token_usage.output_tokens.unwrap_or(0)
+        });
+
         CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&plan_json).unwrap_or_else(|_| plan_json.to_string()),
+            serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
         )])
     }
 
     /// Handle review_plan tool call.
+    /// Runs V-* viability checks first (deterministic), then Q-* quality checks (LLM).
+    /// If V-* fails, skips expensive LLM review.
     async fn handle_review_plan(&self, arguments: Option<JsonObject>) -> CallToolResult {
         // 1. Check limits (short lock)
         {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             if let Err(hard_stop) = self.guardrails.check_before_tool_call(&state) {
+                // Update state to HardStopped before returning error
+                state.status = OrchestrationStatus::HardStopped {
+                    reason: hard_stop.clone(),
+                };
                 return CallToolResult::error(vec![Content::text(format!(
                     "Hard stop: {:?}",
                     hard_stop
@@ -397,13 +443,92 @@ impl OrchestratorClient {
             }
         };
 
-        // 3. Read iteration from state (short lock)
-        let iteration = {
+        // 3. Read iteration and capture starting metrics (short lock)
+        let (iteration, starting_tool_calls, starting_tokens) = {
             let state = self.state.lock().await;
-            state.iteration
+            (state.iteration, state.tool_calls, state.total_tokens)
         };
 
-        // 4. Call reviewer (async, no lock)
+        // 4. Run V-* viability checks FIRST (deterministic, cheap)
+        let viability_result = match serde_json::from_value::<Plan>(input.plan_json.clone()) {
+            Ok(plan) => {
+                let checker = ViabilityChecker::new();
+                let result = checker.check_all(
+                    plan.instructions.as_deref(),
+                    plan.grounding_snapshot.as_ref(),
+                    Some(&plan.file_references),
+                );
+                let metrics = plan.instructions.as_ref().map(|i| checker.analyze_dag(i));
+
+                // Determine if validation passed (no Critical-severity violations)
+                let passed = result
+                    .violations
+                    .iter()
+                    .all(|v| v.severity != ViabilitySeverity::Critical);
+
+                Some((result, metrics, passed))
+            }
+            Err(_) => None, // Plan doesn't parse - skip viability checks
+        };
+
+        // 5. If V-* critical failures, skip expensive LLM review
+        if let Some((ref viability, ref metrics, passed)) = viability_result {
+            if !passed {
+                // Count violations
+                let total_violations = viability.violations.len() as u32;
+                let critical_violations = viability
+                    .violations
+                    .iter()
+                    .filter(|v| v.severity == ViabilitySeverity::Critical)
+                    .count() as u32;
+
+                // Update state with viability failure (short lock)
+                {
+                    let mut state = self.state.lock().await;
+                    state.tool_calls += 1;
+                    // Reset validation flags - viability failed means review not passed
+                    state.requires_human_input_pending = false;
+                    state.last_review_passed = false;
+                    // Mark that the plan has been reviewed (even though it failed viability)
+                    state.needs_review = false;
+                    state.context_summary = state.generate_context_summary();
+
+                    // Record iteration with viability failure
+                    let record = IterationRecord {
+                        iteration,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        viability_violations: total_violations,
+                        viability_critical: critical_violations,
+                        viability_passed: false,
+                        review_score: None,
+                        review_passed: None,
+                        tool_calls_this_iteration: state.tool_calls - starting_tool_calls,
+                        tokens_this_iteration: state.total_tokens - starting_tokens,
+                        outcome: IterationOutcome::ViabilityFailed,
+                    };
+                    state.iteration_history.push(record);
+                }
+                self.persist_state().await;
+
+                let response = serde_json::json!({
+                    "viability": {
+                        "violations": viability.violations,
+                        "metrics": metrics,
+                        "passed": false
+                    },
+                    "llm_review": null,  // Skipped - plan not viable
+                    "passed": false,
+                    "requires_human_input": false,
+                    "summary": "Plan failed viability checks. Fix violations before review."
+                });
+
+                return CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
+                )]);
+            }
+        }
+
+        // 6. Run LLM review (expensive) only if plan is viable
         let (review_json, token_usage) = match self
             .reviewer
             .review_plan_json(&input.plan_json)
@@ -418,47 +543,116 @@ impl OrchestratorClient {
             }
         };
 
-        // 5. Run guardrail checks (no lock needed - guardrails is Arc)
+        // 7. Extract score and check if passed DETERMINISTICALLY
         let score = review_json
             .get("score")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
 
-        let triggered_conditions =
-            self.guardrails
-                .check_all_conditions(&input.plan_json, score, iteration);
+        // CRITICAL: Use deterministic score threshold check, not LLM's "passed" field
+        // The LLM reviewer's "passed" field is informational only - we enforce the threshold
+        let score_passed = self.guardrails.score_passes(score);
 
-        // 6. Build response with guardrail info
-        let requires_human_input = !triggered_conditions.is_empty();
+        // 8. Build response with viability + LLM review
+        // Human input requirement only comes from reviewer LLM (security, ambiguity, etc.)
+        let requires_human_input = review_json
+            .get("requires_human_input")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Log if LLM's passed field disagrees with deterministic check
+        let llm_passed = review_json.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+        if llm_passed != score_passed {
+            tracing::warn!(
+                "LLM reviewer passed={} but score {} {} threshold {} (using deterministic check)",
+                llm_passed,
+                score,
+                if score_passed { ">=" } else { "<" },
+                self.guardrails.score_threshold
+            );
+        }
+
         let response = serde_json::json!({
+            "viability": viability_result.as_ref().map(|(v, m, p)| serde_json::json!({
+                "violations": v.violations,
+                "metrics": m,
+                "passed": p
+            })),
             "llm_review": review_json,
-            "guardrail_checks": triggered_conditions.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
-            "passed": review_json.get("passed").and_then(|v| v.as_bool()).unwrap_or(false),
+            "passed": score_passed,  // Deterministic: score >= threshold
+            "score": score,
+            "threshold": self.guardrails.score_threshold,
             "requires_human_input": requires_human_input,
-            "mandatory_condition": triggered_conditions.first().map(|c| format!("{:?}", c)),
             "summary": review_json.get("summary").and_then(|v| v.as_str()).unwrap_or("Review complete"),
         });
 
-        // 7. Update state (short lock)
+        // 9. Update state (short lock)
         {
             let mut state = self.state.lock().await;
             state.reviews.push(review_json);
             state.tool_calls += 1;
             state.add_tokens(token_usage.input_tokens, token_usage.output_tokens);
 
+            // Set validation flags based on DETERMINISTIC score check (not LLM's passed field)
+            state.last_review_passed = score_passed;
+            state.requires_human_input_pending = requires_human_input;
+
+            // Mark that the current plan has been reviewed
+            state.needs_review = false;
+
             // Track reviewer tokens in breakdown
             let input = token_usage.input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
             let output = token_usage.output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
             state.token_breakdown.add_reviewer(input, output);
 
-            // Track triggered conditions
-            for condition in &triggered_conditions {
-                state.triggered_conditions.push(condition.clone());
+            // Track best plan (highest score seen)
+            if score > state.best_score {
+                state.best_score = score;
+                state.best_plan = state.current_plan.clone();
+                info!("New best plan with score {:.2}", score);
             }
+
+            // Get viability stats for iteration record
+            let (viability_violations, viability_critical) = viability_result
+                .as_ref()
+                .map(|(v, _, _)| {
+                    let total = v.violations.len() as u32;
+                    let critical = v
+                        .violations
+                        .iter()
+                        .filter(|vv| vv.severity == ViabilitySeverity::Critical)
+                        .count() as u32;
+                    (total, critical)
+                })
+                .unwrap_or((0, 0));
+
+            // Record iteration with review result (using deterministic score check)
+            let record = IterationRecord {
+                iteration,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                viability_violations,
+                viability_critical,
+                viability_passed: true, // We got here, so viability passed
+                review_score: Some(score),
+                review_passed: Some(score_passed),  // Deterministic check
+                tool_calls_this_iteration: state.tool_calls - starting_tool_calls,
+                tokens_this_iteration: state.total_tokens - starting_tokens,
+                outcome: if requires_human_input {
+                    IterationOutcome::HumanInputRequested
+                } else if score_passed {
+                    IterationOutcome::ReviewPassed
+                } else {
+                    IterationOutcome::ReviewFailed
+                },
+            };
+            state.iteration_history.push(record);
 
             // Regenerate context summary with latest review data
             state.context_summary = state.generate_context_summary();
         }
+
+        // Persist state after review
+        self.persist_state().await;
 
         CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
@@ -466,6 +660,7 @@ impl OrchestratorClient {
     }
 
     /// Handle request_human_input tool call.
+    /// Validates that the reviewer authorized this pause via requires_human_input=true.
     async fn handle_request_human_input(&self, arguments: Option<JsonObject>) -> CallToolResult {
         let input: RequestHumanInputInput = match arguments {
             Some(args) => match serde_json::from_value(Value::Object(args)) {
@@ -482,18 +677,44 @@ impl OrchestratorClient {
             }
         };
 
-        // Get the most recent triggered condition
-        let (iteration, triggered_condition) = {
+        // 1. Check if this request is authorized (reviewer set requires_human_input=true)
+        let (iteration, is_authorized) = {
             let state = self.state.lock().await;
-            (state.iteration, state.triggered_conditions.last().cloned())
+            (state.iteration, state.requires_human_input_pending)
         };
+
+        // Reject unauthorized pause attempts
+        if !is_authorized {
+            tracing::warn!(
+                "Orchestrator called request_human_input without reviewer approval at iteration {}. \
+                Category: {}, Question: {}",
+                iteration,
+                input.category,
+                input.question.chars().take(100).collect::<String>()
+            );
+
+            let response = serde_json::json!({
+                "status": "rejected",
+                "error": "UNAUTHORIZED_PAUSE",
+                "message": "The reviewer did not set requires_human_input=true. You cannot pause on your own judgment.",
+                "required_action": "Call generate_plan with feedback from the last review to continue iterating.",
+                "iteration": iteration
+            });
+
+            return CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
+            )]);
+        }
+
+        // Build reason from category and question
+        let reason = format!("{}: {}", input.category, input.question);
 
         // Create human input record
         let record = HumanInputRecord {
             question: input.question.clone(),
             category: input.category.clone(),
             response: None,
-            condition: triggered_condition.clone(),
+            reason: Some(reason.clone()),
             iteration,
             timestamp: chrono::Utc::now().to_rfc3339(),
             approved: false,
@@ -503,19 +724,21 @@ impl OrchestratorClient {
         {
             let mut state = self.state.lock().await;
             state.pending_human_input = Some(record.clone());
-            state.status = OrchestrationStatus::Paused {
-                condition: triggered_condition.clone(),
-            };
+            state.status = OrchestrationStatus::Paused { reason: reason.clone() };
             state.tool_calls += 1;
+            // Clear the authorization flag - it's been used
+            state.requires_human_input_pending = false;
         }
 
         let response = serde_json::json!({
             "status": "paused",
-            "reason": "human_input_required",
+            "reason": reason,
             "question": input.question,
             "category": input.category,
-            "condition": triggered_condition.map(|c| format!("{:?}", c)),
         });
+
+        // Persist state after requesting human input
+        self.persist_state().await;
 
         CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
@@ -523,6 +746,7 @@ impl OrchestratorClient {
     }
 
     /// Handle finalize tool call.
+    /// Validates that the plan has passed review before allowing finalization.
     async fn handle_finalize(&self, arguments: Option<JsonObject>) -> CallToolResult {
         let input: FinalizeInput = match arguments {
             Some(args) => match serde_json::from_value(Value::Object(args)) {
@@ -545,15 +769,24 @@ impl OrchestratorClient {
             state.clone()
         };
 
-        // Check if any mandatory conditions are blocking
-        if let Err(blocking_condition) = self
-            .guardrails
-            .check_before_finalize(&input.plan_json, &state_snapshot)
-        {
-            return CallToolResult::error(vec![Content::text(format!(
-                "Cannot finalize: unapproved mandatory condition {:?}",
-                blocking_condition
-            ))]);
+        // 1. Validate that the plan has actually passed review
+        if !state_snapshot.last_review_passed {
+            tracing::warn!(
+                "Orchestrator called finalize but plan hasn't passed review at iteration {}",
+                state_snapshot.iteration
+            );
+
+            let response = serde_json::json!({
+                "status": "rejected",
+                "error": "PLAN_NOT_APPROVED",
+                "message": "Cannot finalize - the plan has not passed review.",
+                "required_action": "Call generate_plan with feedback to improve the plan, then call review_plan.",
+                "iteration": state_snapshot.iteration
+            });
+
+            return CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
+            )]);
         }
 
         // Update state to completed (short lock)
@@ -563,6 +796,9 @@ impl OrchestratorClient {
             state.status = OrchestrationStatus::Completed;
             state.tool_calls += 1;
         }
+
+        // Persist final state
+        self.persist_state().await;
 
         let response = serde_json::json!({
             "success": true,
@@ -575,10 +811,18 @@ impl OrchestratorClient {
     }
 
     /// Handle check_limits tool call.
+    ///
+    /// Returns current iteration state including the task for context recovery
+    /// in case of conversation compaction.
     async fn handle_check_limits(&self) -> CallToolResult {
-        let (iterations, tool_calls, total_tokens) = {
+        let (iterations, tool_calls, total_tokens, task) = {
             let state = self.state.lock().await;
-            (state.iteration, state.tool_calls, state.total_tokens)
+            (
+                state.iteration,
+                state.tool_calls,
+                state.total_tokens,
+                state.task.clone(),
+            )
         };
 
         let max_iterations = self.guardrails.max_iterations;
@@ -609,6 +853,7 @@ impl OrchestratorClient {
         };
 
         let response = serde_json::json!({
+            "task": task,  // Include task for context recovery
             "iterations": iterations,
             "tool_calls": tool_calls,
             "total_tokens": total_tokens,
@@ -759,12 +1004,13 @@ pub async fn register_orchestrator_extension(
 /// Factory function for creating session-scoped OrchestratorClient.
 pub fn create_orchestrator_client(
     session_id: String,
+    session_dir: PathBuf,
     state: Arc<Mutex<OrchestrationState>>,
     guardrails: Arc<Guardrails>,
     planner: Arc<GoosePlanner>,
     reviewer: Arc<GooseReviewer>,
 ) -> OrchestratorClient {
-    OrchestratorClient::new(session_id, state, guardrails, planner, reviewer)
+    OrchestratorClient::new(session_id, session_dir, state, guardrails, planner, reviewer)
 }
 
 #[cfg(test)]

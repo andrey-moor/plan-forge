@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models::{Plan, ReviewResult};
-use super::guardrails::MandatoryCondition;
 
 /// State for resuming from an existing plan
 #[derive(Debug, Clone)]
@@ -115,9 +114,9 @@ pub struct LoopResult {
     pub final_review: ReviewResult,
     /// Whether the session was successful
     pub success: bool,
-    /// Triggered mandatory conditions (orchestrator mode only)
+    /// Best review score achieved (orchestrator mode only)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub triggered_conditions: Option<Vec<MandatoryCondition>>,
+    pub best_score: Option<f32>,
     /// Total tokens consumed (orchestrator mode only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
@@ -134,7 +133,7 @@ impl LoopResult {
             total_iterations: state.iteration,
             final_review: review.clone(),
             success: review.passed,
-            triggered_conditions: None,
+            best_score: None,
             total_tokens: None,
         })
     }

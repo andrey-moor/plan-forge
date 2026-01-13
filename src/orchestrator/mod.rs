@@ -2,7 +2,9 @@ pub mod client;
 pub mod guardrails;
 pub mod loop_controller;
 pub mod orchestration_state;
+pub mod policy;
 pub mod state;
+pub mod viability;
 
 // Legacy exports (deprecated, use orchestrator mode)
 #[allow(deprecated)]
@@ -14,5 +16,13 @@ pub use client::{
     create_orchestrator_client, register_orchestrator_extension, OrchestratorClient,
     SessionRegistry, TokenUsage, EXTENSION_NAME,
 };
-pub use guardrails::{GuardrailHardStop, Guardrails, GuardrailsConfig, MandatoryCondition};
-pub use orchestration_state::{HumanInputRecord, HumanResponse, OrchestrationState, OrchestrationStatus, TokenBreakdown};
+pub use guardrails::{GuardrailHardStop, Guardrails, GuardrailsConfig};
+pub use orchestration_state::{
+    HumanInputRecord, HumanResponse, IterationOutcome, IterationRecord, OrchestrationState,
+    OrchestrationStatus, TokenBreakdown,
+};
+pub use viability::{DagMetrics, ViabilityChecker, ViabilityResult, ViabilitySeverity, ViabilityViolation};
+pub use policy::{
+    detect_format, discover_policies, extract_policies, verify_policies,
+    PolicyCategory, PolicyFileFormat, PolicyRule, PolicySet, PolicySeverity, PolicyViolation,
+};

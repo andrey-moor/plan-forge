@@ -178,7 +178,9 @@ impl GooseReviewer {
 7. **File References**: Do the referenced files make sense for the task?
 
 ## Instructions
-- Use available tools to VERIFY claims where possible
+- Use available tools to VERIFY ALL claims about codebase structure
+- Any claim about file existence or structure MUST be backed by tool use
+- Do not assume codebase structure - search and verify with tools
 - Check if referenced files exist in the codebase
 - Validate that code patterns mentioned actually exist
 - Assess if acceptance criteria are actually testable

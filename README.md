@@ -23,7 +23,7 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 ## Features
 
 - **Iterative Plan-Review Loop**: Generates plans, reviews them for gaps and clarity, and refines until quality threshold is met
-- **Multiple LLM Providers**: Supports Anthropic, OpenAI, LiteLLM, and other providers via [goose](https://github.com/block/goose)
+- **Multiple LLM Providers**: Supports Anthropic, OpenAI, LiteLLM, Microsoft Foundry, and other providers via [goose](https://github.com/block/goose)
 - **MCP Server**: Expose planning tools to AI assistants (Claude Code, Cursor, VS Code)
 - **Customizable Recipes**: Configure prompts, models, and MCP server extensions via YAML files
 - **Structured Output**: Plans are validated against JSON schemas and exported as markdown
@@ -100,6 +100,17 @@ cargo run -- run --path dev/active/my-task/ --task "Use JWT instead of sessions"
 
 # Verbose logging
 cargo run -- run --task "your task" --verbose
+
+# Using LiteLLM proxy (all subagents)
+LITELLM_HOST=http://localhost:4000 \
+LITELLM_API_KEY=sk-your-key \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER=litellm \
+PLAN_FORGE_ORCHESTRATOR_MODEL=claude-opus-4.5 \
+PLAN_FORGE_PLANNER_PROVIDER=litellm \
+PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5 \
+PLAN_FORGE_REVIEWER_PROVIDER=litellm \
+PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5 \
+cargo run -- run --task "your task" --max-total-tokens -1
 ```
 
 ### CLI Options
@@ -115,14 +126,16 @@ cargo run -- run --task "your task" --verbose
 | `--reviewer-model` | | Override LLM model for review |
 | `--planner-provider` | | Override provider (anthropic, openai, litellm) |
 | `--reviewer-provider` | | Override provider for review |
-| `--max-iterations` | | Maximum iterations before giving up (default: 5) |
+| `--max-iterations` | | Maximum iterations before stopping (default: 10) |
 | `--output` | `-o` | Output directory for plan files (default: ./dev/active) |
 | `--threshold` | | Review pass threshold 0.0-1.0 (default: 0.8) |
 | `--verbose` | `-v` | Enable debug logging |
-| `--use-orchestrator` | | Use LLM-powered orchestrator instead of deterministic loop |
+| `--use-legacy-loop` | | Use deprecated LoopController instead of LLM-powered orchestrator |
 | `--orchestrator-model` | | Override orchestrator model |
 | `--orchestrator-provider` | | Override orchestrator provider |
-| `--max-total-tokens` | | Maximum total tokens for orchestrator session |
+| `--max-total-tokens` | | Maximum total tokens for orchestrator session (-1 for unlimited) |
+| `--session-id` | | Session ID to resume (alternative to --path for orchestrator) |
+| `--feedback` | | Feedback for resuming paused orchestrator sessions |
 
 ## Configuration
 
@@ -136,6 +149,8 @@ cargo run -- run --task "your task" --verbose
 | `OPENAI_API_KEY` | OpenAI |
 | `LITELLM_HOST` | LiteLLM |
 | `LITELLM_API_KEY` | LiteLLM |
+| `MICROSOFT_FOUNDRY_RESOURCE` | Microsoft Foundry |
+| `MICROSOFT_FOUNDRY_API_KEY` | Microsoft Foundry |
 
 **Plan-Forge Configuration** (optional overrides):
 
@@ -147,6 +162,8 @@ cargo run -- run --task "your task" --verbose
 | `PLAN_FORGE_PLANNER_MODEL` | Override planner model | - |
 | `PLAN_FORGE_REVIEWER_PROVIDER` | Override reviewer provider | - |
 | `PLAN_FORGE_REVIEWER_MODEL` | Override reviewer model | - |
+| `PLAN_FORGE_ORCHESTRATOR_PROVIDER` | Override orchestrator provider | - |
+| `PLAN_FORGE_ORCHESTRATOR_MODEL` | Override orchestrator model | - |
 | `PLAN_FORGE_RECIPE_DIR` | Directory to search for recipes | - |
 
 Environment variables override config file values but are themselves overridden by CLI arguments.
@@ -337,6 +354,33 @@ plan-forge mcp plan-forge
 
 **Note:** CLI arguments like `--planner-provider` only work with the `run` subcommand, not the MCP server.
 
+### Microsoft Foundry
+
+Microsoft Foundry (Azure AI Foundry) provides access to Claude and other models through Azure.
+
+**Note:** Requires the [forked goose with Foundry support](https://github.com/andrey-moor/goose).
+
+**Environment variables:**
+
+```bash
+export MICROSOFT_FOUNDRY_RESOURCE="your-resource-name"
+export MICROSOFT_FOUNDRY_API_KEY="your-api-key"
+```
+
+**Usage:**
+
+```bash
+MICROSOFT_FOUNDRY_RESOURCE="foundry-myresource" \
+MICROSOFT_FOUNDRY_API_KEY="your-key" \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_ORCHESTRATOR_MODEL="claude-opus-4-5" \
+PLAN_FORGE_PLANNER_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_PLANNER_MODEL="claude-opus-4-5" \
+PLAN_FORGE_REVIEWER_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_REVIEWER_MODEL="claude-opus-4-5" \
+cargo run -- run --task "your task" --max-total-tokens -1
+```
+
 ## MCP Extensions
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers provide tools to the LLM agent.
@@ -415,9 +459,9 @@ Task Description
     └────┘
 ```
 
-### Orchestrator Mode (Experimental)
+### Orchestrator Mode (Default)
 
-Use `--use-orchestrator` to enable an LLM-powered orchestrator that makes dynamic decisions about the planning workflow. The orchestrator:
+The LLM-powered orchestrator is now the default mode. It makes dynamic decisions about the planning workflow:
 
 - Uses goose's in-process MCP extension pattern for tool coordination
 - Enforces 6 mandatory conditions that require human approval (security, sensitive files, low scores, iteration limits, API changes, data deletion)
@@ -425,23 +469,46 @@ Use `--use-orchestrator` to enable an LLM-powered orchestrator that makes dynami
 - Supports pausing for human input and resuming sessions
 
 ```bash
-# Enable orchestrator mode
-cargo run -- run --task "your task" --use-orchestrator
+# Run with orchestrator (default)
+cargo run -- run --task "your task"
 
 # With token budget limit
-cargo run -- run --task "your task" --use-orchestrator --max-total-tokens 100000
+cargo run -- run --task "your task" --max-total-tokens 100000
+
+# Unlimited tokens
+cargo run -- run --task "your task" --max-total-tokens -1
+
+# Use legacy loop controller instead (deprecated)
+cargo run -- run --task "your task" --use-legacy-loop
+```
+
+**With LiteLLM proxy:**
+
+```bash
+LITELLM_HOST=http://localhost:4000 \
+LITELLM_API_KEY=sk- \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER=litellm \
+PLAN_FORGE_ORCHESTRATOR_MODEL=claude-opus-4.5 \
+PLAN_FORGE_PLANNER_PROVIDER=litellm \
+PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5 \
+PLAN_FORGE_REVIEWER_PROVIDER=litellm \
+PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5 \
+cargo run -- run --path requirements.md --max-total-tokens -1
 ```
 
 **Orchestrator Guardrails:**
 
-| Condition | Trigger |
+The orchestrator enforces hard stops that cannot be bypassed:
+
+| Hard Stop | Trigger |
 |-----------|---------|
-| SecuritySensitive | Plan contains credentials, auth, encryption keywords |
-| SensitiveFilePattern | Plan modifies .env, .pem, secrets files |
-| LowScoreThreshold | Review score below 0.5 |
-| IterationSoftLimit | Reached 7+ iterations |
-| BreakingApiChanges | Plan modifies public API signatures |
-| DataDeletionOperations | Plan includes DROP TABLE, rm -rf, etc. |
+| MaxIterations | Exceeds configured max iterations (default: 10) |
+| TokenBudget | Exceeds max total tokens |
+| Timeout | Exceeds execution timeout |
+
+Human input is requested only when the LLM reviewer flags `requires_human_input: true` for security concerns, ambiguous requirements, or architectural decisions.
+
+Review pass/fail is determined deterministically: score >= threshold (default 0.80).
 
 ### Core Flow
 
@@ -580,4 +647,4 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Acknowledgments
 
-Built on [goose](https://github.com/block/goose) by Block, Inc.
+Built on [goose](https://github.com/block/goose) by Block, Inc. Uses a [fork with Microsoft Foundry support](https://github.com/andrey-moor/goose).

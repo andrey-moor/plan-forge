@@ -26,11 +26,11 @@ cargo run -- run --path dev/active/my-task-slug/ --task "also add error handling
 # Run with verbose logging
 cargo run -- run --task "your task" --verbose
 
-# Run with LLM-powered orchestrator (experimental)
-cargo run -- run --task "your task" --use-orchestrator
+# Orchestrator with token budget limit (orchestrator is the default mode)
+cargo run -- run --task "your task" --max-total-tokens 100000
 
-# Orchestrator with token budget limit
-cargo run -- run --task "your task" --use-orchestrator --max-total-tokens 100000
+# Run with legacy loop controller (deprecated)
+cargo run -- run --task "your task" --use-legacy-loop
 
 # Run tests
 cargo test
@@ -74,22 +74,61 @@ export PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5
 plan-forge mcp plan-forge
 ```
 
+**Using Microsoft Foundry with MCP server:**
+
+```bash
+export MICROSOFT_FOUNDRY_RESOURCE=foundry-myresource
+export MICROSOFT_FOUNDRY_API_KEY=your-key
+export PLAN_FORGE_ORCHESTRATOR_PROVIDER=microsoft_foundry
+export PLAN_FORGE_ORCHESTRATOR_MODEL=claude-opus-4-5
+export PLAN_FORGE_PLANNER_PROVIDER=microsoft_foundry
+export PLAN_FORGE_PLANNER_MODEL=claude-opus-4-5
+export PLAN_FORGE_REVIEWER_PROVIDER=microsoft_foundry
+export PLAN_FORGE_REVIEWER_MODEL=claude-opus-4-5
+
+plan-forge mcp plan-forge
+```
+
 ## Architecture
 
 This is a Rust CLI tool that uses the `goose` crate to run an iterative plan-review feedback loop. It generates development plans using an LLM, reviews them, and refines based on feedback.
 
-### Core Flow
+### Component Responsibilities
+
+| Component | Responsibility | LLM? |
+|-----------|---------------|------|
+| **GooseOrchestrator** | Coordination via tool calls | Yes (agent) |
+| **GoosePlanner** | Generate development plans | Yes (agent) |
+| **GooseReviewer** | Review plans (Q-* quality checks) | Yes (agent) |
+| **ViabilityChecker** | Structural validation (V-* checks) | No |
+| **Guardrails** | Numeric limits (tokens, iterations) | No |
+| **OrchestratorClient** | MCP tools for orchestrator agent | No |
+
+### Data Flow
 
 ```text
-Task → Planner (LLM) → Plan → Reviewer (LLM) → ReviewResult
-                         ↑                          ↓
-                         └── Update with feedback ←─┘
+Orchestrator Agent
+    │
+    ├─► generate_plan tool
+    │       └─► GoosePlanner → plan JSON
+    │
+    └─► review_plan tool
+            ├─► ViabilityChecker → V-* violations (deterministic)
+            │       (if V-* fails, skip LLM review)
+            ├─► GooseReviewer → Q-* quality, score (LLM-based)
+            └─► Guardrails → hard stops (tokens, iterations, timeout)
 ```
 
-The `LoopController` (legacy) or `GooseOrchestrator` (with `--use-orchestrator`) orchestrates this cycle until either:
-- The plan passes review (score >= threshold with no hard check failures)
+### Design Principles
+
+1. **Planner = Pure Generation**: No policy checks in planner
+2. **Reviewer = All Policy**: V-* (structural) + Q-* (semantic) checks
+3. **Orchestrator = Coordination**: Calls tools, makes decisions, no checks
+4. **Fail-Fast in Review**: V-* checks run before expensive LLM review
+
+The `GooseOrchestrator` (default) orchestrates this cycle until either:
+- The plan passes review (viability + quality checks pass)
 - Maximum iterations reached
-- Perfect score achieved (early exit if enabled)
 - Human input required (reviewer flags security concern or ambiguity)
 - Hard stop triggered (token budget, timeout)
 
@@ -98,7 +137,8 @@ The `LoopController` (legacy) or `GooseOrchestrator` (with `--use-orchestrator`)
 - **GooseOrchestrator** (`src/phases/orchestrator.rs`): LLM-powered orchestrator with guardrails. Uses goose Agent with in-process MCP extension pattern for dynamic workflow decisions.
 - **LoopController** (`src/orchestrator/loop_controller.rs`): [Deprecated] Legacy deterministic loop controller
 - **OrchestratorClient** (`src/orchestrator/client.rs`): MCP client implementing tool handlers for plan generation, review, and human input. Registered via ExtensionManager.
-- **Guardrails** (`src/orchestrator/guardrails.rs`): Enforces 6 mandatory conditions requiring human approval plus hard stops for token budget/iterations/timeout
+- **ViabilityChecker** (`src/orchestrator/viability.rs`): Deterministic V-* checks (V-001 to V-013) for instruction structure validation
+- **Guardrails** (`src/orchestrator/guardrails.rs`): Enforces hard stops for token budget, max iterations, and execution timeout. Score threshold checked deterministically.
 - **Planner trait** (`src/phases/mod.rs`): Interface for plan generation. `GoosePlanner` uses goose Agent with recipes
 - **Reviewer trait** (`src/phases/mod.rs`): Interface for plan review. `GooseReviewer` validates plans and produces structured feedback
 - **Plan model** (`src/models/plan.rs`): Structured plan with phases, checkpoints, tasks, acceptance criteria, file references, and risks
@@ -108,6 +148,47 @@ The `LoopController` (legacy) or `GooseOrchestrator` (with `--use-orchestrator`)
 
 Recipes (`planner.yaml`, `reviewer.yaml`) define LLM behavior. See [README.md#recipe-customization](README.md#recipe-customization).
 
+### Context Engineering for LLM Prompts
+
+When writing or modifying LLM prompts/recipes, follow these Anthropic best practices:
+
+**1. Use XML Tags for Structure**
+```xml
+<critical-constraints>
+Most important rules that MUST be followed
+</critical-constraints>
+
+<examples>
+Concrete examples showing correct patterns
+</examples>
+
+<final-checklist>
+Reminder of key requirements at the end
+</final-checklist>
+```
+
+**2. Front-Load Critical Constraints (Primacy)**
+Place the most important requirements in the FIRST 50 lines. Claude has strong primacy effects - information at the start is retained better.
+
+**3. Repeat Critical Info at End (Recency)**
+Add a `<final-checklist>` or `<reminder>` section at the end repeating the most violated constraints.
+
+**4. Use Positive Instructions**
+- **DO**: "Add `goal` param to every EDIT_CODE"
+- **DON'T**: "WRONG: `{ "action": "create" }`"
+
+Lead with correct patterns. Minimize "WRONG" examples.
+
+**5. Examples Immediately After Schema**
+When defining a schema or format, provide a complete example within 10 lines.
+
+**6. Concise Reference Tables**
+Replace verbose explanations with scannable tables:
+
+| Check | Severity | Requirement |
+|-------|----------|-------------|
+| V-013 | Critical | EDIT_CODE/GENERATE_TEST need `goal` |
+
 ### Configuration
 
 - Default config in `config/default.yaml`
@@ -116,6 +197,7 @@ Recipes (`planner.yaml`, `reviewer.yaml`) define LLM behavior. See [README.md#re
 
 ## Dependencies
 
-This project uses the Block goose crates from GitHub:
-- `goose` and `goose-mcp` from https://github.com/block/goose (v1.19.0)
+This project uses a forked goose with Microsoft Foundry provider support:
+- `goose` and `goose-mcp` from https://github.com/andrey-moor/goose (branch: `feat/microsoft-foundry-provider`)
+- Based on Block's goose (https://github.com/block/goose)
 - No local checkout required - dependencies are fetched via git

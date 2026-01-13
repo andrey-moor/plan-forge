@@ -10,10 +10,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::guardrails::{GuardrailHardStop, MandatoryCondition};
+use super::guardrails::GuardrailHardStop;
 
 /// Current schema version for state files.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bump when adding/removing/modifying fields.
+pub const SCHEMA_VERSION: u32 = 2;
 
 // ============================================================================
 // Token Breakdown
@@ -82,11 +83,14 @@ impl TokenBreakdown {
 pub enum OrchestrationStatus {
     /// Session is actively running
     Running,
-    /// Session completed successfully
+    /// Session completed successfully (review passed)
     Completed,
-    /// Session paused for human input
+    /// Session completed with best effort (review did not pass threshold)
+    CompletedBestEffort,
+    /// Session paused for human input (reviewer flagged requires_human_input)
     Paused {
-        condition: Option<MandatoryCondition>,
+        /// Reason for pause (from reviewer's human_input_reason)
+        reason: String,
     },
     /// Session failed with error
     Failed { error: String },
@@ -107,14 +111,58 @@ pub struct HumanInputRecord {
     pub category: String,
     /// Human's response (None if pending)
     pub response: Option<String>,
-    /// The mandatory condition that triggered this request
-    pub condition: Option<MandatoryCondition>,
+    /// Reason for the request (from reviewer)
+    pub reason: Option<String>,
     /// Iteration when request was made
     pub iteration: u32,
     /// Timestamp in ISO8601 format
     pub timestamp: String,
     /// Whether the human approved continuing
     pub approved: bool,
+}
+
+// ============================================================================
+// Iteration Tracking
+// ============================================================================
+
+/// Outcome of a single planning iteration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum IterationOutcome {
+    /// Viability checks failed (structural issues)
+    ViabilityFailed,
+    /// Viability passed but LLM review failed
+    ReviewFailed,
+    /// Both viability and review passed
+    ReviewPassed,
+    /// Human input was requested
+    HumanInputRequested,
+    /// Orchestrator responded with text instead of tool call
+    TextResponseDetected,
+}
+
+/// Record of a single planning iteration for analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IterationRecord {
+    /// Which iteration this was (1-indexed)
+    pub iteration: u32,
+    /// When this iteration completed
+    pub timestamp: String,
+    /// Number of viability violations
+    pub viability_violations: u32,
+    /// Number of critical viability violations
+    pub viability_critical: u32,
+    /// Whether viability checks passed
+    pub viability_passed: bool,
+    /// LLM review score (if viability passed)
+    pub review_score: Option<f32>,
+    /// Whether LLM review passed (if viability passed)
+    pub review_passed: Option<bool>,
+    /// Tool calls made this iteration
+    pub tool_calls_this_iteration: u32,
+    /// Tokens used this iteration
+    pub tokens_this_iteration: u64,
+    /// What happened in this iteration
+    pub outcome: IterationOutcome,
 }
 
 // ============================================================================
@@ -154,11 +202,32 @@ pub struct OrchestrationState {
     pub context_summary: String,
     /// Pending human input request (not yet answered)
     pub pending_human_input: Option<HumanInputRecord>,
-    /// Triggered mandatory conditions
-    pub triggered_conditions: Vec<MandatoryCondition>,
     /// Token usage breakdown by component
     #[serde(default)]
     pub token_breakdown: TokenBreakdown,
+    /// Per-iteration history for progress analysis
+    #[serde(default)]
+    pub iteration_history: Vec<IterationRecord>,
+    /// Set to true by review_plan when reviewer returns requires_human_input=true.
+    /// Reset to false after legitimate request_human_input call or at start of new review.
+    /// Used to validate that request_human_input is only called when authorized.
+    #[serde(default)]
+    pub requires_human_input_pending: bool,
+    /// Set by review_plan to track whether the last review passed.
+    /// Used by finalize to validate the call is legitimate.
+    #[serde(default)]
+    pub last_review_passed: bool,
+    /// Best plan seen so far (highest scoring)
+    #[serde(default)]
+    pub best_plan: Option<Value>,
+    /// Best review score seen so far
+    #[serde(default)]
+    pub best_score: f32,
+    /// Set to true by generate_plan when a new plan is created.
+    /// Set to false by review_plan after the plan has been reviewed.
+    /// Used to ensure the orchestrator calls review_plan after generate_plan.
+    #[serde(default)]
+    pub needs_review: bool,
 }
 
 impl OrchestrationState {
@@ -185,8 +254,13 @@ impl OrchestrationState {
             human_inputs: Vec::new(),
             context_summary: format!("Task: {}", task.chars().take(200).collect::<String>()),
             pending_human_input: None,
-            triggered_conditions: Vec::new(),
             token_breakdown: TokenBreakdown::default(),
+            iteration_history: Vec::new(),
+            requires_human_input_pending: false,
+            last_review_passed: false,
+            best_plan: None,
+            best_score: 0.0,
+            needs_review: false,
         }
     }
 
@@ -309,7 +383,7 @@ impl OrchestrationState {
             if input.approved {
                 summary.push(format!(
                     "Human approved {:?}: {}",
-                    input.condition,
+                    input.reason.as_deref().unwrap_or("(unknown reason)"),
                     input.response.as_deref().unwrap_or("(no response)")
                 ));
             }
@@ -411,7 +485,7 @@ mod tests {
 
         assert!(state.can_resume());
 
-        state.status = OrchestrationStatus::Paused { condition: None };
+        state.status = OrchestrationStatus::Paused { reason: "test".to_string() };
         assert!(state.can_resume());
 
         state.status = OrchestrationStatus::HardStopped {
