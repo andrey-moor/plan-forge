@@ -15,8 +15,8 @@ use plan_forge::models::{
     ExistingPattern, GroundingSnapshot, Instruction, OpCode, VerifiedFile, VerifiedTarget,
 };
 use plan_forge::orchestrator::{
-    GuardrailHardStop, Guardrails, GuardrailsConfig, HumanInputRecord,
-    OrchestrationState, OrchestrationStatus, SessionRegistry, TokenBreakdown,
+    GuardrailHardStop, Guardrails, GuardrailsConfig, HumanInputRecord, OrchestrationState,
+    OrchestrationStatus, SessionRegistry, TokenBreakdown,
 };
 
 // ============================================================================
@@ -201,7 +201,9 @@ fn test_orchestration_state_can_resume() {
     assert!(state.can_resume());
 
     // Paused state can resume
-    state.status = OrchestrationStatus::Paused { reason: "test".to_string() };
+    state.status = OrchestrationStatus::Paused {
+        reason: "test".to_string(),
+    };
     assert!(state.can_resume());
 
     // Failed state can resume
@@ -299,7 +301,11 @@ fn test_token_breakdown_overhead_ratio() {
     breakdown.add_reviewer(50, 0);
 
     let ratio = breakdown.overhead_ratio();
-    assert!((ratio - 0.3).abs() < 0.01, "Expected ~30% overhead, got {}", ratio);
+    assert!(
+        (ratio - 0.3).abs() < 0.01,
+        "Expected ~30% overhead, got {}",
+        ratio
+    );
 }
 
 // ============================================================================
@@ -414,7 +420,10 @@ fn test_human_input_record_with_reason() {
     };
 
     assert_eq!(record.category, "clarification");
-    assert_eq!(record.reason.as_deref(), Some("clarification: Requirements unclear"));
+    assert_eq!(
+        record.reason.as_deref(),
+        Some("clarification: Requirements unclear")
+    );
 }
 
 // ============================================================================
@@ -446,7 +455,10 @@ fn test_orchestration_status_transitions() {
 
     // Transition to CompletedBestEffort
     state.status = OrchestrationStatus::CompletedBestEffort;
-    assert!(matches!(state.status, OrchestrationStatus::CompletedBestEffort));
+    assert!(matches!(
+        state.status,
+        OrchestrationStatus::CompletedBestEffort
+    ));
 
     // Transition to HardStopped (terminal)
     state.status = OrchestrationStatus::HardStopped {
@@ -455,7 +467,10 @@ fn test_orchestration_status_transitions() {
             limit: 10,
         },
     };
-    assert!(matches!(state.status, OrchestrationStatus::HardStopped { .. }));
+    assert!(matches!(
+        state.status,
+        OrchestrationStatus::HardStopped { .. }
+    ));
     assert!(!state.can_resume());
 }
 
@@ -506,7 +521,11 @@ fn test_opcode_serialization() {
 
     for (op, expected) in ops {
         let serialized = serde_json::to_string(&op).unwrap();
-        assert_eq!(serialized, expected, "OpCode {:?} should serialize to {}", op, expected);
+        assert_eq!(
+            serialized, expected,
+            "OpCode {:?} should serialize to {}",
+            op, expected
+        );
 
         // Verify roundtrip
         let deserialized: OpCode = serde_json::from_str(&serialized).unwrap();

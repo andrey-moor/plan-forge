@@ -4,7 +4,7 @@ pub mod orchestrator;
 pub mod planner;
 pub mod reviewer;
 
-pub use agent_utils::{create_provider, resolve_working_dir, setup_agent_session, ProviderConfig};
+pub use agent_utils::{ProviderConfig, create_provider, resolve_working_dir, setup_agent_session};
 pub use json_utils::extract_json_block;
 pub use orchestrator::*;
 pub use planner::*;

@@ -15,8 +15,8 @@ use crate::orchestrator::TokenUsage;
 use crate::recipes::load_recipe;
 
 use super::{
-    create_provider, resolve_working_dir, setup_agent_session, extract_json_block,
-    ProviderConfig, ReviewContext, Reviewer,
+    ProviderConfig, ReviewContext, Reviewer, create_provider, extract_json_block,
+    resolve_working_dir, setup_agent_session,
 };
 
 /// Reviewer implementation using goose Agent with hard checklist
@@ -254,10 +254,11 @@ Score guidelines:
         }
 
         // Get token usage from session
-        let token_usage = if let Ok(sess) =
-            SessionManager::get_session(&session_id, false).await
-        {
-            TokenUsage::new(sess.accumulated_input_tokens, sess.accumulated_output_tokens)
+        let token_usage = if let Ok(sess) = SessionManager::get_session(&session_id, false).await {
+            TokenUsage::new(
+                sess.accumulated_input_tokens,
+                sess.accumulated_output_tokens,
+            )
         } else {
             TokenUsage::default()
         };
@@ -284,7 +285,10 @@ Score guidelines:
         };
 
         // Add passed field based on score and threshold
-        let score = review_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let score = review_json
+            .get("score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
         let passed = score >= self.score_threshold;
 
         let mut result = review_json;

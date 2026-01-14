@@ -12,7 +12,7 @@ use tracing::info;
 use goose::agents::Agent;
 use goose::providers::{base::Provider, create_with_named_model};
 use goose::recipe::Recipe;
-use goose::session::{session_manager::SessionType, Session, SessionManager};
+use goose::session::{Session, SessionManager, session_manager::SessionType};
 
 /// Configuration for creating an LLM provider.
 ///

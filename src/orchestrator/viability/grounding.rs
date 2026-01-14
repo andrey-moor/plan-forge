@@ -39,9 +39,8 @@ impl ViabilityChecker {
                 instruction_id: None,
                 severity: ViabilitySeverity::Critical,
                 message: format!("Plan references non-existent file: {}", f.path),
-                remediation:
-                    "Verify file path is correct or add file_reference with action=create"
-                        .to_string(),
+                remediation: "Verify file path is correct or add file_reference with action=create"
+                    .to_string(),
             })
             .collect()
     }
@@ -99,10 +98,10 @@ impl ViabilityChecker {
                 }
 
                 for dep_id in &instr.dependencies {
-                    if let Some(&dep_idx) = id_to_idx.get(dep_id.as_str()) {
-                        if find_context_dep(instructions, id_to_idx, dep_idx, visited, context_ops) {
-                            return true;
-                        }
+                    if let Some(&dep_idx) = id_to_idx.get(dep_id.as_str())
+                        && find_context_dep(instructions, id_to_idx, dep_idx, visited, context_ops)
+                    {
+                        return true;
                     }
                 }
                 false
@@ -133,7 +132,9 @@ impl ViabilityChecker {
                         "Execution op '{}' ({:?}) has no dependencies - missing grounding phase",
                         instr.id, instr.op
                     ),
-                    remediation: "Add SEARCH_CODE or READ_FILES before this instruction to gather context".to_string(),
+                    remediation:
+                        "Add SEARCH_CODE or READ_FILES before this instruction to gather context"
+                            .to_string(),
                 });
             }
         }

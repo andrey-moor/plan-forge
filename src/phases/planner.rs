@@ -15,8 +15,8 @@ use crate::orchestrator::TokenUsage;
 use crate::recipes::load_recipe;
 
 use super::{
-    create_provider, resolve_working_dir, setup_agent_session, extract_json_block,
-    Planner, PlanningContext, ProviderConfig,
+    Planner, PlanningContext, ProviderConfig, create_provider, extract_json_block,
+    resolve_working_dir, setup_agent_session,
 };
 
 /// Planner implementation using goose Agent
@@ -294,15 +294,8 @@ Return ONLY the JSON plan.
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let session_name = format!("orchestrator-planner-{}", chrono::Utc::now().timestamp());
-        let session = setup_agent_session(
-            &agent,
-            &recipe,
-            provider,
-            &wd,
-            &session_name,
-            "planner",
-        )
-        .await?;
+        let session =
+            setup_agent_session(&agent, &recipe, provider, &wd, &session_name, "planner").await?;
         let session_id = session.id.clone();
 
         agent
@@ -340,10 +333,11 @@ Return ONLY the JSON plan.
         }
 
         // Get token usage from session
-        let token_usage = if let Ok(sess) =
-            SessionManager::get_session(&session_id, false).await
-        {
-            TokenUsage::new(sess.accumulated_input_tokens, sess.accumulated_output_tokens)
+        let token_usage = if let Ok(sess) = SessionManager::get_session(&session_id, false).await {
+            TokenUsage::new(
+                sess.accumulated_input_tokens,
+                sess.accumulated_output_tokens,
+            )
         } else {
             TokenUsage::default()
         };

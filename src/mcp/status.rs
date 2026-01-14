@@ -181,11 +181,14 @@ fn derive_orchestrator_status(
     let token_budget_remaining = max_total_tokens.saturating_sub(state.total_tokens);
 
     // Map pending human input
-    let pending_human_input = state.pending_human_input.as_ref().map(|p| PendingHumanInput {
-        question: p.question.clone(),
-        category: p.category.clone(),
-        reason: p.reason.clone(),
-    });
+    let pending_human_input = state
+        .pending_human_input
+        .as_ref()
+        .map(|p| PendingHumanInput {
+            question: p.question.clone(),
+            category: p.category.clone(),
+            reason: p.reason.clone(),
+        });
 
     Ok(SessionInfo {
         session_id,
@@ -193,7 +196,11 @@ fn derive_orchestrator_status(
         iteration: state.iteration,
         status: final_status,
         latest_score: None,
-        best_score: if state.best_score > 0.0 { Some(state.best_score) } else { None },
+        best_score: if state.best_score > 0.0 {
+            Some(state.best_score)
+        } else {
+            None
+        },
         input_reason,
         title,
         total_tokens: Some(state.total_tokens),

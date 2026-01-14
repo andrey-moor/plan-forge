@@ -15,18 +15,18 @@ use tracing::{debug, info, warn};
 
 use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::{Message, MessageContent};
-use goose::session::{session_manager::SessionType, SessionManager};
+use goose::session::{SessionManager, session_manager::SessionType};
 
-use super::{create_provider, ProviderConfig};
+use super::{ProviderConfig, create_provider};
 
 use crate::config::{GuardrailsConfig, OrchestratorConfig, OutputConfig};
 use crate::models::Plan;
-use crate::output::FileOutputWriter;
 use crate::orchestrator::{
-    create_orchestrator_client, register_orchestrator_extension, GuardrailHardStop, Guardrails,
-    HumanResponse, IterationOutcome, IterationRecord, OrchestrationState,
-    OrchestrationStatus, SessionRegistry, TokenBreakdown,
+    GuardrailHardStop, Guardrails, HumanResponse, IterationOutcome, IterationRecord,
+    OrchestrationState, OrchestrationStatus, SessionRegistry, TokenBreakdown,
+    create_orchestrator_client, register_orchestrator_extension,
 };
+use crate::output::FileOutputWriter;
 use crate::phases::{GoosePlanner, GooseReviewer};
 use crate::recipes::load_recipe;
 // ============================================================================
@@ -179,7 +179,10 @@ impl GooseOrchestrator {
                     state.status
                 ));
             }
-            info!("Resuming orchestrator session from iteration {}", state.iteration);
+            info!(
+                "Resuming orchestrator session from iteration {}",
+                state.iteration
+            );
             state
         } else {
             OrchestrationState::new(
@@ -231,8 +234,7 @@ impl GooseOrchestrator {
         let provider = create_provider(&provider_config, &recipe).await?;
 
         // Run agent with timeout
-        let timeout_duration =
-            Duration::from_secs(self.guardrails_config.execution_timeout_secs);
+        let timeout_duration = Duration::from_secs(self.guardrails_config.execution_timeout_secs);
         let max_iterations = self.guardrails_config.max_iterations;
 
         // Track sessions created for token accounting
@@ -327,7 +329,7 @@ impl GooseOrchestrator {
                         error: format!("Agent error: {}", e),
                     };
                     state.save(&session_dir)?;
-                    return Err(e.into());
+                    return Err(e);
                 }
                 Err(_) => {
                     // Timeout - save state with hard stop
@@ -450,11 +452,15 @@ impl GooseOrchestrator {
 
         if should_write_plan {
             // Use best_plan for CompletedBestEffort, otherwise current_plan
-            let plan_to_write = if matches!(final_state.status, OrchestrationStatus::CompletedBestEffort) {
-                final_state.best_plan.as_ref().or(final_state.current_plan.as_ref())
-            } else {
-                final_state.current_plan.as_ref()
-            };
+            let plan_to_write =
+                if matches!(final_state.status, OrchestrationStatus::CompletedBestEffort) {
+                    final_state
+                        .best_plan
+                        .as_ref()
+                        .or(final_state.current_plan.as_ref())
+                } else {
+                    final_state.current_plan.as_ref()
+                };
 
             if let Some(plan_json) = plan_to_write {
                 match serde_json::from_value::<Plan>(plan_json.clone()) {
@@ -469,15 +475,24 @@ impl GooseOrchestrator {
                         // Determine status for output
                         let output_status = match &final_state.status {
                             OrchestrationStatus::Completed => crate::output::PlanStatus::Approved,
-                            OrchestrationStatus::CompletedBestEffort => crate::output::PlanStatus::BestEffort {
-                                score: final_state.best_score,
-                            },
+                            OrchestrationStatus::CompletedBestEffort => {
+                                crate::output::PlanStatus::BestEffort {
+                                    score: final_state.best_score,
+                                }
+                            }
                             OrchestrationStatus::Paused { .. } => crate::output::PlanStatus::Draft,
                             _ => crate::output::PlanStatus::Draft,
                         };
 
-                        if let Err(e) = output.write_final_with_plan_status(&plan, output_status).await {
-                            warn!("Failed to write plan to {}: {}", self.output_config.active_dir.display(), e);
+                        if let Err(e) = output
+                            .write_final_with_plan_status(&plan, output_status)
+                            .await
+                        {
+                            warn!(
+                                "Failed to write plan to {}: {}",
+                                self.output_config.active_dir.display(),
+                                e
+                            );
                         }
                     }
                     Err(e) => {
@@ -681,9 +696,7 @@ IMPORTANT: Respond ONLY with tool calls. Make your decision now."#,
 // LoopResult Conversion
 // ============================================================================
 
-use crate::models::{
-    LlmReview, PlanContext, PlanMetadata, PlanTier, ReviewResult,
-};
+use crate::models::{LlmReview, PlanContext, PlanMetadata, PlanTier, ReviewResult};
 use crate::orchestrator::LoopResult;
 
 impl From<OrchestrationResult> for LoopResult {

@@ -19,9 +19,8 @@ static VAR_REF_PATTERN: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Pattern to match ${instruction_id.field} for field validation (V-008)
-static VAR_FIELD_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\$\{(\w+)\.(\w+)\}").expect("invalid VAR_FIELD_PATTERN regex")
-});
+static VAR_FIELD_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$\{(\w+)\.(\w+)\}").expect("invalid VAR_FIELD_PATTERN regex"));
 
 impl ViabilityChecker {
     /// V-006: Check that variable references have corresponding dependencies

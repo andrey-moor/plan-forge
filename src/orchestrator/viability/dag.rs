@@ -102,18 +102,18 @@ impl ViabilityChecker {
             .collect();
 
         for instr in instructions {
-            if !visited.contains(instr.id.as_str()) {
-                if let Some(cycle) =
+            if !visited.contains(instr.id.as_str())
+                && let Some(cycle) =
                     self.dfs_cycle(&instr.id, &adj, &mut visited, &mut rec_stack, &mut path)
-                {
-                    return Some(cycle);
-                }
+            {
+                return Some(cycle);
             }
         }
 
         None
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn dfs_cycle<'a>(
         &self,
         node: &'a str,

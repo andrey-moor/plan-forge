@@ -232,12 +232,7 @@ pub struct OrchestrationState {
 
 impl OrchestrationState {
     /// Create a new orchestration state for a task.
-    pub fn new(
-        session_id: String,
-        task: String,
-        working_dir: PathBuf,
-        task_slug: String,
-    ) -> Self {
+    pub fn new(session_id: String, task: String, working_dir: PathBuf, task_slug: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             session_id,
@@ -269,7 +264,10 @@ impl OrchestrationState {
     pub fn add_tokens(&mut self, input_tokens: Option<i32>, output_tokens: Option<i32>) {
         let input = input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
         let output = output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
-        self.total_tokens = self.total_tokens.saturating_add(input).saturating_add(output);
+        self.total_tokens = self
+            .total_tokens
+            .saturating_add(input)
+            .saturating_add(output);
     }
 
     /// Save state to a JSON file using atomic write pattern.
@@ -369,13 +367,13 @@ impl OrchestrationState {
         summary.push(format!("Total tokens: {}", self.total_tokens));
 
         // Last review summary
-        if let Some(last_review) = self.reviews.last() {
-            if let Some(review_summary) = last_review.get("summary").and_then(|v| v.as_str()) {
-                summary.push(format!(
-                    "Last review: {}",
-                    review_summary.chars().take(200).collect::<String>()
-                ));
-            }
+        if let Some(last_review) = self.reviews.last()
+            && let Some(review_summary) = last_review.get("summary").and_then(|v| v.as_str())
+        {
+            summary.push(format!(
+                "Last review: {}",
+                review_summary.chars().take(200).collect::<String>()
+            ));
         }
 
         // Human inputs
@@ -485,7 +483,9 @@ mod tests {
 
         assert!(state.can_resume());
 
-        state.status = OrchestrationStatus::Paused { reason: "test".to_string() };
+        state.status = OrchestrationStatus::Paused {
+            reason: "test".to_string(),
+        };
         assert!(state.can_resume());
 
         state.status = OrchestrationStatus::HardStopped {

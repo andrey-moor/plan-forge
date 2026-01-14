@@ -5,8 +5,8 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use plan_forge::{
-    generate_slug, slugify_truncate, CliConfig, GooseOrchestrator, HumanResponse,
-    OrchestrationState, Plan, PlanForgeServer, ResumeState, SessionRegistry, slugify,
+    CliConfig, GooseOrchestrator, HumanResponse, OrchestrationState, Plan, PlanForgeServer,
+    ResumeState, SessionRegistry, generate_slug, slugify, slugify_truncate,
 };
 
 // Re-export MCP server types from goose-mcp
@@ -154,7 +154,6 @@ struct RunArgs {
     verbose: bool,
 
     // ============ Orchestrator Mode Flags ============
-
     /// Override orchestrator model (e.g., "claude-sonnet-4-20250514")
     #[arg(long)]
     orchestrator_model: Option<String>,
@@ -295,10 +294,14 @@ fn resolve_input(args: &RunArgs) -> Result<(String, String, Option<ResumeState>)
             let state_file = session_dir.join("orchestration-state.json");
             if state_file.exists() {
                 // Orchestrator session - load state to get original task
-                let state = OrchestrationState::load(&session_dir)?
-                    .ok_or_else(|| anyhow::anyhow!("Failed to load orchestration state from {:?}", session_dir))?;
+                let state = OrchestrationState::load(&session_dir)?.ok_or_else(|| {
+                    anyhow::anyhow!("Failed to load orchestration state from {:?}", session_dir)
+                })?;
 
-                info!("Resuming orchestrator session from iteration {}", state.iteration);
+                info!(
+                    "Resuming orchestrator session from iteration {}",
+                    state.iteration
+                );
 
                 // Return original task - orchestrator handles resume internally
                 // The --task or --feedback arg will be used as human response in orchestrator mode
@@ -418,11 +421,7 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     }
     if let Some(tokens) = args.max_total_tokens {
         // -1 (or any negative) means unlimited
-        config.guardrails.max_total_tokens = if tokens < 0 {
-            u64::MAX
-        } else {
-            tokens as u64
-        };
+        config.guardrails.max_total_tokens = if tokens < 0 { u64::MAX } else { tokens as u64 };
     }
 
     // Use slug from resolve_input (handles resume correctly), or generate if needed

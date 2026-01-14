@@ -97,7 +97,10 @@ impl Guardrails {
     // ========================================================================
 
     /// Check before any tool call - returns error if hard limit exceeded.
-    pub fn check_before_tool_call(&self, state: &OrchestrationState) -> Result<(), GuardrailHardStop> {
+    pub fn check_before_tool_call(
+        &self,
+        state: &OrchestrationState,
+    ) -> Result<(), GuardrailHardStop> {
         if state.total_tokens >= self.max_total_tokens {
             return Err(GuardrailHardStop::TokenBudgetExhausted {
                 used: state.total_tokens,
@@ -155,11 +158,19 @@ mod tests {
 
         let state = OrchestrationState {
             total_tokens: 1500,
-            ..OrchestrationState::new("test".to_string(), "task".to_string(), std::path::PathBuf::new(), "slug".to_string())
+            ..OrchestrationState::new(
+                "test".to_string(),
+                "task".to_string(),
+                std::path::PathBuf::new(),
+                "slug".to_string(),
+            )
         };
 
         let result = guardrails.check_before_tool_call(&state);
-        assert!(matches!(result, Err(GuardrailHardStop::TokenBudgetExhausted { .. })));
+        assert!(matches!(
+            result,
+            Err(GuardrailHardStop::TokenBudgetExhausted { .. })
+        ));
     }
 
     #[test]
@@ -178,7 +189,13 @@ mod tests {
         state.iteration = 6;
 
         let result = guardrails.check_before_tool_call(&state);
-        assert!(matches!(result, Err(GuardrailHardStop::MaxIterationsExceeded { iteration: 6, limit: 5 })));
+        assert!(matches!(
+            result,
+            Err(GuardrailHardStop::MaxIterationsExceeded {
+                iteration: 6,
+                limit: 5
+            })
+        ));
     }
 
     #[test]
@@ -197,7 +214,13 @@ mod tests {
         state.tool_calls = 51;
 
         let result = guardrails.check_before_tool_call(&state);
-        assert!(matches!(result, Err(GuardrailHardStop::MaxToolCallsExceeded { calls: 51, limit: 50 })));
+        assert!(matches!(
+            result,
+            Err(GuardrailHardStop::MaxToolCallsExceeded {
+                calls: 51,
+                limit: 50
+            })
+        ));
     }
 
     #[test]

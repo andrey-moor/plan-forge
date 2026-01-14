@@ -9,22 +9,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::info;
 use async_trait::async_trait;
+use rmcp::ServiceError;
 use rmcp::model::{
     CallToolResult, Content, GetPromptResult, Implementation, InitializeResult, JsonObject,
-    ListPromptsResult, ListResourcesResult, ListToolsResult, ProtocolVersion,
-    ReadResourceResult, ServerCapabilities, ServerNotification, Tool, ToolsCapability,
+    ListPromptsResult, ListResourcesResult, ListToolsResult, ProtocolVersion, ReadResourceResult,
+    ServerCapabilities, ServerNotification, Tool, ToolsCapability,
 };
 use rmcp::serde_json::{self, Value};
-use rmcp::ServiceError;
+use tracing::info;
 
 // Type alias matching goose mcp_client.rs
 type Error = ServiceError;
-use schemars::schema_for;
 use schemars::JsonSchema;
+use schemars::schema_for;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use goose::agents::extension::ExtensionConfig;
@@ -34,7 +34,7 @@ use super::guardrails::Guardrails;
 use super::orchestration_state::{
     HumanInputRecord, IterationOutcome, IterationRecord, OrchestrationState, OrchestrationStatus,
 };
-use super::viability::{analyze_dag, ViabilityChecker, ViabilitySeverity};
+use super::viability::{ViabilityChecker, ViabilitySeverity, analyze_dag};
 use crate::models::Plan;
 use crate::phases::{GoosePlanner, GooseReviewer};
 
@@ -329,11 +329,11 @@ impl OrchestratorClient {
                     return CallToolResult::error(vec![Content::text(format!(
                         "Invalid arguments: {}",
                         e
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![Content::text("Missing required arguments")])
+                return CallToolResult::error(vec![Content::text("Missing required arguments")]);
             }
         };
 
@@ -367,10 +367,7 @@ impl OrchestratorClient {
         {
             Ok(v) => v,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "Planner failed: {}",
-                    e
-                ))])
+                return CallToolResult::error(vec![Content::text(format!("Planner failed: {}", e))]);
             }
         };
 
@@ -386,8 +383,14 @@ impl OrchestratorClient {
             state.needs_review = true;
 
             // Track planner tokens in breakdown
-            let input = token_usage.input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
-            let output = token_usage.output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
+            let input = token_usage
+                .input_tokens
+                .map(|t| t.max(0) as u64)
+                .unwrap_or(0);
+            let output = token_usage
+                .output_tokens
+                .map(|t| t.max(0) as u64)
+                .unwrap_or(0);
             state.token_breakdown.add_planner(input, output);
 
             // Regenerate context summary after each iteration for efficient context passing
@@ -435,11 +438,11 @@ impl OrchestratorClient {
                     return CallToolResult::error(vec![Content::text(format!(
                         "Invalid arguments: {}",
                         e
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![Content::text("Missing required arguments")])
+                return CallToolResult::error(vec![Content::text("Missing required arguments")]);
             }
         };
 
@@ -472,76 +475,73 @@ impl OrchestratorClient {
         };
 
         // 5. If V-* critical failures, skip expensive LLM review
-        if let Some((ref viability, ref metrics, passed)) = viability_result {
-            if !passed {
-                // Count violations
-                let total_violations = viability.violations.len() as u32;
-                let critical_violations = viability
-                    .violations
-                    .iter()
-                    .filter(|v| v.severity == ViabilitySeverity::Critical)
-                    .count() as u32;
+        if let Some((ref viability, ref metrics, passed)) = viability_result
+            && !passed
+        {
+            // Count violations
+            let total_violations = viability.violations.len() as u32;
+            let critical_violations = viability
+                .violations
+                .iter()
+                .filter(|v| v.severity == ViabilitySeverity::Critical)
+                .count() as u32;
 
-                // Update state with viability failure (short lock)
-                {
-                    let mut state = self.state.lock().await;
-                    state.tool_calls += 1;
-                    // Reset validation flags - viability failed means review not passed
-                    state.requires_human_input_pending = false;
-                    state.last_review_passed = false;
-                    // Mark that the plan has been reviewed (even though it failed viability)
-                    state.needs_review = false;
-                    state.context_summary = state.generate_context_summary();
+            // Update state with viability failure (short lock)
+            {
+                let mut state = self.state.lock().await;
+                state.tool_calls += 1;
+                // Reset validation flags - viability failed means review not passed
+                state.requires_human_input_pending = false;
+                state.last_review_passed = false;
+                // Mark that the plan has been reviewed (even though it failed viability)
+                state.needs_review = false;
+                state.context_summary = state.generate_context_summary();
 
-                    // Record iteration with viability failure
-                    let record = IterationRecord {
-                        iteration,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        viability_violations: total_violations,
-                        viability_critical: critical_violations,
-                        viability_passed: false,
-                        review_score: None,
-                        review_passed: None,
-                        tool_calls_this_iteration: state.tool_calls - starting_tool_calls,
-                        tokens_this_iteration: state.total_tokens - starting_tokens,
-                        outcome: IterationOutcome::ViabilityFailed,
-                    };
-                    state.iteration_history.push(record);
-                }
-                self.persist_state().await;
-
-                let response = serde_json::json!({
-                    "viability": {
-                        "violations": viability.violations,
-                        "metrics": metrics,
-                        "passed": false
-                    },
-                    "llm_review": null,  // Skipped - plan not viable
-                    "passed": false,
-                    "requires_human_input": false,
-                    "summary": "Plan failed viability checks. Fix violations before review."
-                });
-
-                return CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
-                )]);
+                // Record iteration with viability failure
+                let record = IterationRecord {
+                    iteration,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    viability_violations: total_violations,
+                    viability_critical: critical_violations,
+                    viability_passed: false,
+                    review_score: None,
+                    review_passed: None,
+                    tool_calls_this_iteration: state.tool_calls - starting_tool_calls,
+                    tokens_this_iteration: state.total_tokens - starting_tokens,
+                    outcome: IterationOutcome::ViabilityFailed,
+                };
+                state.iteration_history.push(record);
             }
+            self.persist_state().await;
+
+            let response = serde_json::json!({
+                "viability": {
+                    "violations": viability.violations,
+                    "metrics": metrics,
+                    "passed": false
+                },
+                "llm_review": null,  // Skipped - plan not viable
+                "passed": false,
+                "requires_human_input": false,
+                "summary": "Plan failed viability checks. Fix violations before review."
+            });
+
+            return CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
+            )]);
         }
 
         // 6. Run LLM review (expensive) only if plan is viable
-        let (review_json, token_usage) = match self
-            .reviewer
-            .review_plan_json(&input.plan_json)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "Reviewer failed: {}",
-                    e
-                ))])
-            }
-        };
+        let (review_json, token_usage) =
+            match self.reviewer.review_plan_json(&input.plan_json).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return CallToolResult::error(vec![Content::text(format!(
+                        "Reviewer failed: {}",
+                        e
+                    ))]);
+                }
+            };
 
         // 7. Extract score and check if passed DETERMINISTICALLY
         let score = review_json
@@ -561,7 +561,10 @@ impl OrchestratorClient {
             .unwrap_or(false);
 
         // Log if LLM's passed field disagrees with deterministic check
-        let llm_passed = review_json.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let llm_passed = review_json
+            .get("passed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if llm_passed != score_passed {
             tracing::warn!(
                 "LLM reviewer passed={} but score {} {} threshold {} (using deterministic check)",
@@ -601,8 +604,14 @@ impl OrchestratorClient {
             state.needs_review = false;
 
             // Track reviewer tokens in breakdown
-            let input = token_usage.input_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
-            let output = token_usage.output_tokens.map(|t| t.max(0) as u64).unwrap_or(0);
+            let input = token_usage
+                .input_tokens
+                .map(|t| t.max(0) as u64)
+                .unwrap_or(0);
+            let output = token_usage
+                .output_tokens
+                .map(|t| t.max(0) as u64)
+                .unwrap_or(0);
             state.token_breakdown.add_reviewer(input, output);
 
             // Track best plan (highest score seen)
@@ -634,7 +643,7 @@ impl OrchestratorClient {
                 viability_critical,
                 viability_passed: true, // We got here, so viability passed
                 review_score: Some(score),
-                review_passed: Some(score_passed),  // Deterministic check
+                review_passed: Some(score_passed), // Deterministic check
                 tool_calls_this_iteration: state.tool_calls - starting_tool_calls,
                 tokens_this_iteration: state.total_tokens - starting_tokens,
                 outcome: if requires_human_input {
@@ -669,11 +678,11 @@ impl OrchestratorClient {
                     return CallToolResult::error(vec![Content::text(format!(
                         "Invalid arguments: {}",
                         e
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![Content::text("Missing required arguments")])
+                return CallToolResult::error(vec![Content::text("Missing required arguments")]);
             }
         };
 
@@ -724,7 +733,9 @@ impl OrchestratorClient {
         {
             let mut state = self.state.lock().await;
             state.pending_human_input = Some(record.clone());
-            state.status = OrchestrationStatus::Paused { reason: reason.clone() };
+            state.status = OrchestrationStatus::Paused {
+                reason: reason.clone(),
+            };
             state.tool_calls += 1;
             // Clear the authorization flag - it's been used
             state.requires_human_input_pending = false;
@@ -755,11 +766,11 @@ impl OrchestratorClient {
                     return CallToolResult::error(vec![Content::text(format!(
                         "Invalid arguments: {}",
                         e
-                    ))])
+                    ))]);
                 }
             },
             None => {
-                return CallToolResult::error(vec![Content::text("Missing required arguments")])
+                return CallToolResult::error(vec![Content::text("Missing required arguments")]);
             }
         };
 
@@ -1010,7 +1021,14 @@ pub fn create_orchestrator_client(
     planner: Arc<GoosePlanner>,
     reviewer: Arc<GooseReviewer>,
 ) -> OrchestratorClient {
-    OrchestratorClient::new(session_id, session_dir, state, guardrails, planner, reviewer)
+    OrchestratorClient::new(
+        session_id,
+        session_dir,
+        state,
+        guardrails,
+        planner,
+        reviewer,
+    )
 }
 
 #[cfg(test)]
@@ -1049,7 +1067,9 @@ mod tests {
         );
 
         // First call creates the session
-        let state1 = registry.get_or_create("session1", initial_state.clone()).await;
+        let state1 = registry
+            .get_or_create("session1", initial_state.clone())
+            .await;
         {
             let s = state1.lock().await;
             assert_eq!(s.session_id, "session1");
@@ -1124,7 +1144,9 @@ mod tests {
                 PathBuf::from("/test"),
                 format!("slug{}", i),
             );
-            let state = registry.get_or_create(&format!("session{}", i), initial_state).await;
+            let state = registry
+                .get_or_create(&format!("session{}", i), initial_state)
+                .await;
             {
                 let mut s = state.lock().await;
                 s.iteration = i as u32;
@@ -1157,7 +1179,9 @@ mod tests {
                     PathBuf::from("/test"),
                     format!("slug{}", i),
                 );
-                let state = reg.get_or_create(&format!("concurrent{}", i), initial_state).await;
+                let state = reg
+                    .get_or_create(&format!("concurrent{}", i), initial_state)
+                    .await;
 
                 // Modify state
                 {

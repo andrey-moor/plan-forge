@@ -57,19 +57,15 @@ pub enum PolicyCategory {
 /// Severity level for policy rules
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PolicySeverity {
     /// Blocks plan approval
     Critical,
     /// Should be addressed but doesn't block
+    #[default]
     Warning,
     /// Informational, for context
     Info,
-}
-
-impl Default for PolicySeverity {
-    fn default() -> Self {
-        Self::Warning
-    }
 }
 
 /// A policy rule extracted from CLAUDE.md or AGENT.md
@@ -171,7 +167,10 @@ pub fn detect_format(content: &str, filename: &str) -> PolicyFileFormat {
         ".pre-commit-config.yaml",
     ];
 
-    let agent_score: usize = agent_markers.iter().filter(|m| content.contains(*m)).count();
+    let agent_score: usize = agent_markers
+        .iter()
+        .filter(|m| content.contains(*m))
+        .count();
 
     // Check for CLAUDE.md markers
     let claude_markers = [
@@ -282,12 +281,18 @@ fn categorize_agent_rule(title: &str) -> (PolicyCategory, &'static str) {
     }
 
     // Style rules
-    if title_lower.contains("format") || title_lower.contains("lint") || title_lower.contains("style") {
+    if title_lower.contains("format")
+        || title_lower.contains("lint")
+        || title_lower.contains("style")
+    {
         return (PolicyCategory::Style, "AGENT");
     }
 
     // Environment rules
-    if title_lower.contains("wsl") || title_lower.contains("environment") || title_lower.contains("path") {
+    if title_lower.contains("wsl")
+        || title_lower.contains("environment")
+        || title_lower.contains("path")
+    {
         return (PolicyCategory::Environment, "AGENT");
     }
 
@@ -378,7 +383,9 @@ fn generate_agent_patterns(title: &str, content: &str) -> (Option<String>, Optio
     }
 
     // Test rules
-    if title_lower.contains("never") && (title_lower.contains("skip") || title_lower.contains("disable")) {
+    if title_lower.contains("never")
+        && (title_lower.contains("skip") || title_lower.contains("disable"))
+    {
         return (
             None,
             Some(r"--skip|--no-tests|pytest\.mark\.skip|@pytest\.mark\.skip".to_string()),
@@ -513,7 +520,10 @@ fn categorize_keyword_rule(keyword: &str, text: &str) -> PolicyCategory {
     let text_lower = text.to_lowercase();
     let keyword_upper = keyword.to_uppercase();
 
-    if keyword_upper == "NEVER" || text_lower.contains("forbidden") || text_lower.contains("prohibited") {
+    if keyword_upper == "NEVER"
+        || text_lower.contains("forbidden")
+        || text_lower.contains("prohibited")
+    {
         return PolicyCategory::Prohibited;
     }
 
@@ -523,10 +533,14 @@ fn categorize_keyword_rule(keyword: &str, text: &str) -> PolicyCategory {
     if text_lower.contains("build") || text_lower.contains("compile") {
         return PolicyCategory::Build;
     }
-    if text_lower.contains("security") || text_lower.contains("credential") || text_lower.contains("secret") {
+    if text_lower.contains("security")
+        || text_lower.contains("credential")
+        || text_lower.contains("secret")
+    {
         return PolicyCategory::Security;
     }
-    if text_lower.contains("format") || text_lower.contains("lint") || text_lower.contains("style") {
+    if text_lower.contains("format") || text_lower.contains("lint") || text_lower.contains("style")
+    {
         return PolicyCategory::Style;
     }
 
@@ -570,31 +584,40 @@ pub fn discover_policies(project_root: &Path) -> Vec<PolicySet> {
 
     // Check for AGENT.md (monorepo pattern)
     let agent_md = project_root.join("AGENT.md");
-    if agent_md.exists() {
-        if let Ok(content) = std::fs::read_to_string(&agent_md) {
-            policy_sets.push(extract_policies(&content, agent_md.to_str().unwrap_or("AGENT.md")));
-        }
+    if agent_md.exists()
+        && let Ok(content) = std::fs::read_to_string(&agent_md)
+    {
+        policy_sets.push(extract_policies(
+            &content,
+            agent_md.to_str().unwrap_or("AGENT.md"),
+        ));
     }
 
     // Check for CLAUDE.md
     let claude_md = project_root.join("CLAUDE.md");
-    if claude_md.exists() {
-        if let Ok(content) = std::fs::read_to_string(&claude_md) {
-            policy_sets.push(extract_policies(&content, claude_md.to_str().unwrap_or("CLAUDE.md")));
-        }
+    if claude_md.exists()
+        && let Ok(content) = std::fs::read_to_string(&claude_md)
+    {
+        policy_sets.push(extract_policies(
+            &content,
+            claude_md.to_str().unwrap_or("CLAUDE.md"),
+        ));
     }
 
     // Check for .claude/ directory with custom policies
     let claude_dir = project_root.join(".claude");
-    if claude_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&claude_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map(|e| e == "md").unwrap_or(false) {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        policy_sets.push(extract_policies(&content, path.to_str().unwrap_or("policy.md")));
-                    }
-                }
+    if claude_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&claude_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "md").unwrap_or(false)
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                policy_sets.push(extract_policies(
+                    &content,
+                    path.to_str().unwrap_or("policy.md"),
+                ));
             }
         }
     }
@@ -612,38 +635,38 @@ pub fn verify_policies(instructions: &[Instruction], policies: &PolicySet) -> Ve
 
     for rule in &policies.rules {
         // Check enforcement patterns (must be present for critical rules)
-        if let Some(ref pattern) = rule.enforcement_pattern {
-            if let Ok(re) = Regex::new(pattern) {
-                let found = instructions.iter().any(|instr| {
-                    let params_str = serde_json::to_string(&instr.params).unwrap_or_default();
-                    re.is_match(&params_str) || re.is_match(&instr.description)
-                });
+        if let Some(ref pattern) = rule.enforcement_pattern
+            && let Ok(re) = Regex::new(pattern)
+        {
+            let found = instructions.iter().any(|instr| {
+                let params_str = serde_json::to_string(&instr.params).unwrap_or_default();
+                re.is_match(&params_str) || re.is_match(&instr.description)
+            });
 
-                // Only flag missing enforcement for critical rules
-                if !found && rule.severity == PolicySeverity::Critical {
-                    violations.push(PolicyViolation {
-                        rule_id: rule.id.clone(),
-                        instruction_id: None,
-                        message: format!("Missing required action: {}", rule.description),
-                        severity: rule.severity.clone(),
-                    });
-                }
+            // Only flag missing enforcement for critical rules
+            if !found && rule.severity == PolicySeverity::Critical {
+                violations.push(PolicyViolation {
+                    rule_id: rule.id.clone(),
+                    instruction_id: None,
+                    message: format!("Missing required action: {}", rule.description),
+                    severity: rule.severity.clone(),
+                });
             }
         }
 
         // Check violation patterns (must NOT be present)
-        if let Some(ref pattern) = rule.violation_pattern {
-            if let Ok(re) = Regex::new(pattern) {
-                for instr in instructions {
-                    let params_str = serde_json::to_string(&instr.params).unwrap_or_default();
-                    if re.is_match(&params_str) || re.is_match(&instr.description) {
-                        violations.push(PolicyViolation {
-                            rule_id: rule.id.clone(),
-                            instruction_id: Some(instr.id.clone()),
-                            message: format!("Forbidden action detected: {}", rule.description),
-                            severity: rule.severity.clone(),
-                        });
-                    }
+        if let Some(ref pattern) = rule.violation_pattern
+            && let Ok(re) = Regex::new(pattern)
+        {
+            for instr in instructions {
+                let params_str = serde_json::to_string(&instr.params).unwrap_or_default();
+                if re.is_match(&params_str) || re.is_match(&instr.description) {
+                    violations.push(PolicyViolation {
+                        rule_id: rule.id.clone(),
+                        instruction_id: Some(instr.id.clone()),
+                        message: format!("Forbidden action detected: {}", rule.description),
+                        severity: rule.severity.clone(),
+                    });
                 }
             }
         }
@@ -758,8 +781,10 @@ Tests must always pass before merging.
         assert!(!bzl_rules.is_empty(), "Should extract BZL rules");
 
         // Check keywords
-        assert!(policies.rules[0].keywords.contains(&"CRITICAL".to_string())
-            || policies.rules[0].keywords.contains(&"ALWAYS".to_string()));
+        assert!(
+            policies.rules[0].keywords.contains(&"CRITICAL".to_string())
+                || policies.rules[0].keywords.contains(&"ALWAYS".to_string())
+        );
     }
 
     #[test]
@@ -904,7 +929,10 @@ python -m pytest tests/
         ];
 
         let violations = verify_policies(&instructions, &policies);
-        assert!(violations.is_empty(), "Should not have violations when compliant");
+        assert!(
+            violations.is_empty(),
+            "Should not have violations when compliant"
+        );
     }
 
     #[test]
@@ -919,9 +947,18 @@ python -m pytest tests/
 
     #[test]
     fn test_severity_determination() {
-        assert_eq!(determine_severity("CRITICAL rule"), PolicySeverity::Critical);
-        assert_eq!(determine_severity("NEVER do this"), PolicySeverity::Critical);
-        assert_eq!(determine_severity("You should do this"), PolicySeverity::Warning);
+        assert_eq!(
+            determine_severity("CRITICAL rule"),
+            PolicySeverity::Critical
+        );
+        assert_eq!(
+            determine_severity("NEVER do this"),
+            PolicySeverity::Critical
+        );
+        assert_eq!(
+            determine_severity("You should do this"),
+            PolicySeverity::Warning
+        );
         assert_eq!(determine_severity("General info"), PolicySeverity::Info);
     }
 

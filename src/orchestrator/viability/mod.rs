@@ -20,7 +20,7 @@ mod metrics;
 mod types;
 
 // Re-export all public items
-pub use metrics::{analyze_dag, DagMetrics};
+pub use metrics::{DagMetrics, analyze_dag};
 pub use types::*;
 
 use crate::models::{FileReference, GroundingSnapshot, Instruction};
@@ -119,9 +119,8 @@ impl ViabilityChecker {
         let passed = critical_count == 0;
 
         // Score: start at 1.0, subtract 0.2 per critical, 0.05 per warning
-        let score = (1.0 - (critical_count as f32 * 0.2) - (warning_count as f32 * 0.05))
-            .max(0.0)
-            .min(1.0);
+        let score =
+            (1.0 - (critical_count as f32 * 0.2) - (warning_count as f32 * 0.05)).clamp(0.0, 1.0);
 
         ViabilityResult {
             passed,

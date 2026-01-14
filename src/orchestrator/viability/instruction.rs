@@ -22,44 +22,41 @@ impl ViabilityChecker {
             match instr.op {
                 OpCode::EditCode => {
                     // Check if params specifies multiple files
-                    if let Some(files) = instr.params.get("files") {
-                        if let Some(arr) = files.as_array() {
-                            if arr.len() > self.max_files_per_edit {
-                                violations.push(ViabilityViolation {
-                                    rule_id: "VIABILITY-004".to_string(),
-                                    instruction_id: Some(instr.id.clone()),
-                                    severity: ViabilitySeverity::Warning,
-                                    message: format!(
-                                        "EDIT_CODE instruction '{}' touches {} files (max {})",
-                                        instr.id,
-                                        arr.len(),
-                                        self.max_files_per_edit
-                                    ),
-                                    remediation:
-                                        "Consider splitting into multiple EDIT_CODE instructions"
-                                            .to_string(),
-                                });
-                            }
-                        }
+                    if let Some(files) = instr.params.get("files")
+                        && let Some(arr) = files.as_array()
+                        && arr.len() > self.max_files_per_edit
+                    {
+                        violations.push(ViabilityViolation {
+                            rule_id: "VIABILITY-004".to_string(),
+                            instruction_id: Some(instr.id.clone()),
+                            severity: ViabilitySeverity::Warning,
+                            message: format!(
+                                "EDIT_CODE instruction '{}' touches {} files (max {})",
+                                instr.id,
+                                arr.len(),
+                                self.max_files_per_edit
+                            ),
+                            remediation: "Consider splitting into multiple EDIT_CODE instructions"
+                                .to_string(),
+                        });
                     }
                 }
                 OpCode::SearchCode => {
                     // Check query length
-                    if let Some(query) = instr.params.get("query") {
-                        if let Some(q) = query.as_str() {
-                            if q.len() < self.min_search_query_length {
-                                violations.push(ViabilityViolation {
-                                    rule_id: "VIABILITY-004".to_string(),
-                                    instruction_id: Some(instr.id.clone()),
-                                    severity: ViabilitySeverity::Warning,
-                                    message: format!(
-                                        "SEARCH_CODE query '{}' is too short (min {} chars)",
-                                        q, self.min_search_query_length
-                                    ),
-                                    remediation: "Use a more specific search query".to_string(),
-                                });
-                            }
-                        }
+                    if let Some(query) = instr.params.get("query")
+                        && let Some(q) = query.as_str()
+                        && q.len() < self.min_search_query_length
+                    {
+                        violations.push(ViabilityViolation {
+                            rule_id: "VIABILITY-004".to_string(),
+                            instruction_id: Some(instr.id.clone()),
+                            severity: ViabilitySeverity::Warning,
+                            message: format!(
+                                "SEARCH_CODE query '{}' is too short (min {} chars)",
+                                q, self.min_search_query_length
+                            ),
+                            remediation: "Use a more specific search query".to_string(),
+                        });
                     }
                 }
                 _ => {}
@@ -81,9 +78,7 @@ impl ViabilityChecker {
 
         for instr in instructions {
             let missing = match instr.op {
-                OpCode::SearchCode | OpCode::SearchSemantic => {
-                    instr.params.get("query").is_none()
-                }
+                OpCode::SearchCode | OpCode::SearchSemantic => instr.params.get("query").is_none(),
                 OpCode::ReadFiles => {
                     instr.params.get("paths").is_none() && !self.has_variable_ref(&instr.params)
                 }
@@ -139,120 +134,103 @@ impl ViabilityChecker {
         for instr in instructions {
             match instr.op {
                 OpCode::SearchCode | OpCode::SearchSemantic => {
-                    if let Some(query) = instr.params.get("query") {
-                        if !query.is_string() && !self.is_variable_ref_value(query) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "query",
-                                "string",
-                                query,
-                            ));
-                        }
+                    if let Some(query) = instr.params.get("query")
+                        && !query.is_string()
+                        && !self.is_variable_ref_value(query)
+                    {
+                        violations.push(self.schema_violation(&instr.id, "query", "string", query));
                     }
-                    if let Some(limit) = instr.params.get("limit") {
-                        if !limit.is_u64() {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "limit",
-                                "number",
-                                limit,
-                            ));
-                        }
+                    if let Some(limit) = instr.params.get("limit")
+                        && !limit.is_u64()
+                    {
+                        violations.push(self.schema_violation(&instr.id, "limit", "number", limit));
                     }
                 }
                 OpCode::ReadFiles => {
-                    if let Some(paths) = instr.params.get("paths") {
-                        if !paths.is_array()
-                            && !paths.is_string()
-                            && !self.is_variable_ref_value(paths)
-                        {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "paths",
-                                "array or string or variable reference",
-                                paths,
-                            ));
-                        }
+                    if let Some(paths) = instr.params.get("paths")
+                        && !paths.is_array()
+                        && !paths.is_string()
+                        && !self.is_variable_ref_value(paths)
+                    {
+                        violations.push(self.schema_violation(
+                            &instr.id,
+                            "paths",
+                            "array or string or variable reference",
+                            paths,
+                        ));
                     }
                 }
                 OpCode::EditCode => {
-                    if let Some(goal) = instr.params.get("goal") {
-                        if !goal.is_string() && !self.is_variable_ref_value(goal) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "goal",
-                                "string",
-                                goal,
-                            ));
-                        }
+                    if let Some(goal) = instr.params.get("goal")
+                        && !goal.is_string()
+                        && !self.is_variable_ref_value(goal)
+                    {
+                        violations.push(self.schema_violation(&instr.id, "goal", "string", goal));
                     }
-                    if let Some(files) = instr.params.get("files") {
-                        if !files.is_array() && !self.is_variable_ref_value(files) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "files",
-                                "array or variable reference",
-                                files,
-                            ));
-                        }
+                    if let Some(files) = instr.params.get("files")
+                        && !files.is_array()
+                        && !self.is_variable_ref_value(files)
+                    {
+                        violations.push(self.schema_violation(
+                            &instr.id,
+                            "files",
+                            "array or variable reference",
+                            files,
+                        ));
                     }
                 }
                 OpCode::RunCommand => {
-                    if let Some(command) = instr.params.get("command") {
-                        if !command.is_string() && !self.is_variable_ref_value(command) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "command",
-                                "string",
-                                command,
-                            ));
-                        }
+                    if let Some(command) = instr.params.get("command")
+                        && !command.is_string()
+                        && !self.is_variable_ref_value(command)
+                    {
+                        violations
+                            .push(self.schema_violation(&instr.id, "command", "string", command));
                     }
                 }
                 OpCode::RunTest | OpCode::GenerateTest => {
-                    if let Some(target) = instr.params.get("target") {
-                        if !target.is_string() && !self.is_variable_ref_value(target) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "target",
-                                "string or variable reference",
-                                target,
-                            ));
-                        }
+                    if let Some(target) = instr.params.get("target")
+                        && !target.is_string()
+                        && !self.is_variable_ref_value(target)
+                    {
+                        violations.push(self.schema_violation(
+                            &instr.id,
+                            "target",
+                            "string or variable reference",
+                            target,
+                        ));
                     }
-                    if let Some(behavior) = instr.params.get("behavior") {
-                        if !behavior.is_string() {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "behavior",
-                                "string",
-                                behavior,
-                            ));
-                        }
+                    if let Some(behavior) = instr.params.get("behavior")
+                        && !behavior.is_string()
+                    {
+                        violations
+                            .push(self.schema_violation(&instr.id, "behavior", "string", behavior));
                     }
                 }
                 OpCode::VerifyExists => {
-                    if let Some(path) = instr.params.get("path") {
-                        if !path.is_string() && !self.is_variable_ref_value(path) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "path",
-                                "string or variable reference",
-                                path,
-                            ));
-                        }
+                    if let Some(path) = instr.params.get("path")
+                        && !path.is_string()
+                        && !self.is_variable_ref_value(path)
+                    {
+                        violations.push(self.schema_violation(
+                            &instr.id,
+                            "path",
+                            "string or variable reference",
+                            path,
+                        ));
                     }
                 }
                 OpCode::GetDependencies => {
-                    if let Some(path) = instr.params.get("path") {
-                        if !path.is_string() && !self.is_variable_ref_value(path) {
-                            violations.push(self.schema_violation(
-                                &instr.id,
-                                "path",
-                                "string or variable reference",
-                                path,
-                            ));
-                        }
+                    if let Some(path) = instr.params.get("path")
+                        && !path.is_string()
+                        && !self.is_variable_ref_value(path)
+                    {
+                        violations.push(self.schema_violation(
+                            &instr.id,
+                            "path",
+                            "string or variable reference",
+                            path,
+                        ));
                     }
                 }
                 OpCode::DefineTask | OpCode::VerifyTask => {
@@ -645,8 +623,12 @@ mod tests {
 
         let violations = checker.check_agent_task_params(&instructions);
         // Should have Critical for missing goal, Warning for missing other fields
-        assert!(violations.iter().any(|v| v.severity == ViabilitySeverity::Critical
-            && v.message.contains("missing required 'goal'")));
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.severity == ViabilitySeverity::Critical
+                    && v.message.contains("missing required 'goal'"))
+        );
     }
 
     #[test]
@@ -666,9 +648,11 @@ mod tests {
 
         let violations = checker.check_agent_task_params(&instructions);
         // No critical violations (warnings for missing fields are ok if goal present)
-        assert!(violations
-            .iter()
-            .all(|v| v.severity != ViabilitySeverity::Critical));
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.severity != ViabilitySeverity::Critical)
+        );
     }
 
     // V-014: Empty Instructions Tests

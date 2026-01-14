@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::config::OutputConfig;
 use crate::models::{GroundingGate, GroundingSnapshot, Instruction, Plan, ReviewResult};
-use crate::orchestrator::viability::{analyze_dag, DagMetrics};
+use crate::orchestrator::viability::{DagMetrics, analyze_dag};
 use crate::slugify;
 
 use super::OutputWriter;
@@ -61,12 +61,10 @@ impl FileOutputWriter {
         md.push_str(&format!("# {}\n\n", plan.title));
         match status {
             PlanStatus::Approved => md.push_str("**Status**: Approved\n"),
-            PlanStatus::BestEffort { score } => {
-                md.push_str(&format!(
-                    "**Status**: Best Effort (score {:.2} - did not pass 0.80 threshold)\n",
-                    score
-                ))
-            }
+            PlanStatus::BestEffort { score } => md.push_str(&format!(
+                "**Status**: Best Effort (score {:.2} - did not pass 0.80 threshold)\n",
+                score
+            )),
             PlanStatus::Draft => md.push_str("**Status**: DRAFT - Awaiting Human Input\n"),
         }
         md.push_str(&format!("**Objective**: {}\n\n", plan.description));
@@ -83,10 +81,10 @@ impl FileOutputWriter {
         // =========================================================================
         // Phase 0.0: Grounding Gate (verify before any coding)
         // =========================================================================
-        if let Some(gates) = &plan.grounding_gates {
-            if !gates.is_empty() {
-                md.push_str(&self.render_grounding_gates(gates));
-            }
+        if let Some(gates) = &plan.grounding_gates
+            && !gates.is_empty()
+        {
+            md.push_str(&self.render_grounding_gates(gates));
         }
 
         // =========================================================================
@@ -95,7 +93,11 @@ impl FileOutputWriter {
         for (i, phase) in plan.phases.iter().enumerate() {
             // Strip "Phase N:" prefix if present to avoid duplication (e.g., "Phase 0: Phase 0: Foundation")
             let clean_name = if phase.name.starts_with("Phase ") {
-                phase.name.split_once(": ").map(|(_, rest)| rest).unwrap_or(&phase.name)
+                phase
+                    .name
+                    .split_once(": ")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(&phase.name)
             } else {
                 &phase.name
             };
@@ -185,7 +187,7 @@ impl FileOutputWriter {
         let has_appendix = plan.reasoning.is_some()
             || plan.grounding_snapshot.is_some()
             || (plan.instructions.is_some()
-                && plan.instructions.as_ref().map_or(false, |i| !i.is_empty()))
+                && plan.instructions.as_ref().is_some_and(|i| !i.is_empty()))
             || !plan.context.problem_statement.is_empty()
             || !plan.context.constraints.is_empty()
             || !plan.context.existing_patterns.is_empty();
@@ -244,10 +246,10 @@ impl FileOutputWriter {
             }
 
             // Execution Instructions (ISA DAG for automation)
-            if let Some(instructions) = &plan.instructions {
-                if !instructions.is_empty() {
-                    md.push_str(&self.render_instructions(instructions));
-                }
+            if let Some(instructions) = &plan.instructions
+                && !instructions.is_empty()
+            {
+                md.push_str(&self.render_instructions(instructions));
             }
         }
 
@@ -369,12 +371,7 @@ impl FileOutputWriter {
         // Detailed instruction list
         md.push_str("**Instruction Details:**\n\n");
         for (i, instr) in instructions.iter().enumerate() {
-            md.push_str(&format!(
-                "{}. **{}** (`{:?}`)\n",
-                i + 1,
-                instr.id,
-                instr.op
-            ));
+            md.push_str(&format!("{}. **{}** (`{:?}`)\n", i + 1, instr.id, instr.op));
             md.push_str(&format!("   - {}\n", instr.description));
             if !instr.dependencies.is_empty() {
                 md.push_str(&format!(
@@ -385,7 +382,7 @@ impl FileOutputWriter {
             // Show params if non-empty and non-null
             if !instr.params.is_null()
                 && instr.params != serde_json::json!({})
-                && !instr.params.as_object().map_or(false, |o| o.is_empty())
+                && !instr.params.as_object().is_some_and(|o| o.is_empty())
             {
                 // Format params compactly for readability
                 if let Ok(params_str) = serde_json::to_string(&instr.params) {
@@ -423,7 +420,10 @@ impl FileOutputWriter {
         md.push_str("**DAG Parallelization Metrics:**\n\n");
         md.push_str("| Metric | Value |\n");
         md.push_str("|--------|-------|\n");
-        md.push_str(&format!("| Total Instructions | {} |\n", metrics.total_nodes));
+        md.push_str(&format!(
+            "| Total Instructions | {} |\n",
+            metrics.total_nodes
+        ));
         md.push_str(&format!(
             "| Root Nodes (parallel start) | {} |\n",
             metrics.root_nodes
@@ -473,22 +473,26 @@ impl FileOutputWriter {
 
         // Write single consolidated execution plan (matches reference plan format)
         let plan_path = task_dir.join(format!("{}-plan.md", task_name));
-        fs::write(&plan_path, self.plan_to_markdown_with_status(plan, is_draft)).await?;
+        fs::write(
+            &plan_path,
+            self.plan_to_markdown_with_status(plan, is_draft),
+        )
+        .await?;
         info!("Wrote {:?}", plan_path);
 
         // Write execution DAG JSON to active_dir (for automation/execution)
         // This is the machine-readable ISA DAG that downstream tools can consume
-        if let Some(instructions) = &plan.instructions {
-            if !instructions.is_empty() {
-                let dag_path = task_dir.join(format!("{}-dag.json", task_name));
-                let dag_content = serde_json::json!({
-                    "goal": plan.goal(), // Use accessor that falls back to title
-                    "reasoning": plan.reasoning.clone(),
-                    "instructions": instructions
-                });
-                fs::write(&dag_path, serde_json::to_string_pretty(&dag_content)?).await?;
-                info!("Wrote {:?}", dag_path);
-            }
+        if let Some(instructions) = &plan.instructions
+            && !instructions.is_empty()
+        {
+            let dag_path = task_dir.join(format!("{}-dag.json", task_name));
+            let dag_content = serde_json::json!({
+                "goal": plan.goal(), // Use accessor that falls back to title
+                "reasoning": plan.reasoning.clone(),
+                "instructions": instructions
+            });
+            fs::write(&dag_path, serde_json::to_string_pretty(&dag_content)?).await?;
+            info!("Wrote {:?}", dag_path);
         }
 
         // Write final JSON to runs_dir (for machine processing, not committed)
@@ -503,7 +507,11 @@ impl FileOutputWriter {
     }
 
     /// Write final plan with explicit status (approved, best-effort, draft)
-    pub async fn write_final_with_plan_status(&self, plan: &Plan, status: PlanStatus) -> Result<()> {
+    pub async fn write_final_with_plan_status(
+        &self,
+        plan: &Plan,
+        status: PlanStatus,
+    ) -> Result<()> {
         self.ensure_active_dir().await?;
         self.ensure_runs_dir().await?;
 
@@ -520,22 +528,26 @@ impl FileOutputWriter {
 
         // Write single consolidated execution plan (matches reference plan format)
         let plan_path = task_dir.join(format!("{}-plan.md", task_name));
-        fs::write(&plan_path, self.plan_to_markdown_with_plan_status(plan, status)).await?;
+        fs::write(
+            &plan_path,
+            self.plan_to_markdown_with_plan_status(plan, status),
+        )
+        .await?;
         info!("Wrote {:?}", plan_path);
 
         // Write execution DAG JSON to active_dir (for automation/execution)
         // This is the machine-readable ISA DAG that downstream tools can consume
-        if let Some(instructions) = &plan.instructions {
-            if !instructions.is_empty() {
-                let dag_path = task_dir.join(format!("{}-dag.json", task_name));
-                let dag_content = serde_json::json!({
-                    "goal": plan.goal(), // Use accessor that falls back to title
-                    "reasoning": plan.reasoning.clone(),
-                    "instructions": instructions
-                });
-                fs::write(&dag_path, serde_json::to_string_pretty(&dag_content)?).await?;
-                info!("Wrote {:?}", dag_path);
-            }
+        if let Some(instructions) = &plan.instructions
+            && !instructions.is_empty()
+        {
+            let dag_path = task_dir.join(format!("{}-dag.json", task_name));
+            let dag_content = serde_json::json!({
+                "goal": plan.goal(), // Use accessor that falls back to title
+                "reasoning": plan.reasoning.clone(),
+                "instructions": instructions
+            });
+            fs::write(&dag_path, serde_json::to_string_pretty(&dag_content)?).await?;
+            info!("Wrote {:?}", dag_path);
         }
 
         // Write final JSON to runs_dir (for machine processing, not committed)
