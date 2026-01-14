@@ -277,6 +277,7 @@ impl PlanForgeServer {
             &session_dir,
             self.config.score_threshold(),
             self.config.guardrails.max_iterations,
+            self.config.guardrails.max_total_tokens,
         )
         .map_err(|e| {
             ErrorData::new(
@@ -329,6 +330,7 @@ impl PlanForgeServer {
                 &session_dir,
                 self.config.score_threshold(),
                 self.config.guardrails.max_iterations,
+                self.config.guardrails.max_total_tokens,
             ) {
                 session_infos.push(info);
             }

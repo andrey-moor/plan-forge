@@ -113,6 +113,7 @@ pub fn derive_status(
     session_dir: &Path,
     score_threshold: f32,
     max_iterations: u32,
+    max_total_tokens: u64,
 ) -> anyhow::Result<SessionInfo> {
     use crate::orchestrator::OrchestrationState;
 
@@ -124,7 +125,7 @@ pub fn derive_status(
 
     // Check for orchestrator state file first
     if let Ok(Some(orch_state)) = OrchestrationState::load(session_dir) {
-        return derive_orchestrator_status(session_id, session_dir, orch_state);
+        return derive_orchestrator_status(session_id, session_dir, orch_state, max_total_tokens);
     }
 
     // Fall back to legacy file-based derivation
@@ -136,6 +137,7 @@ fn derive_orchestrator_status(
     session_id: String,
     session_dir: &Path,
     state: crate::orchestrator::OrchestrationState,
+    max_total_tokens: u64,
 ) -> anyhow::Result<SessionInfo> {
     use crate::orchestrator::OrchestrationStatus;
 
@@ -175,8 +177,7 @@ fn derive_orchestrator_status(
         .and_then(|t| t.as_str())
         .map(String::from);
 
-    // Calculate token budget remaining (default max is 500,000)
-    let max_total_tokens = 500_000u64;
+    // Calculate token budget remaining
     let token_budget_remaining = max_total_tokens.saturating_sub(state.total_tokens);
 
     // Map pending human input
@@ -398,7 +399,7 @@ mod tests {
         let session_dir = temp.path().join("my-session");
         fs::create_dir(&session_dir).unwrap();
 
-        let info = derive_status(&session_dir, 0.8, 5).unwrap();
+        let info = derive_status(&session_dir, 0.8, 5, 500_000).unwrap();
         assert_eq!(info.status, SessionStatus::Ready);
         assert_eq!(info.iteration, 0);
     }
@@ -420,7 +421,7 @@ mod tests {
         )
         .unwrap();
 
-        let info = derive_status(&session_dir, 0.8, 5).unwrap();
+        let info = derive_status(&session_dir, 0.8, 5, 500_000).unwrap();
         assert_eq!(info.status, SessionStatus::InProgress);
         assert_eq!(info.iteration, 1);
         assert_eq!(info.title, Some("Test Plan".to_string()));
