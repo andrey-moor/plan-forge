@@ -367,7 +367,10 @@ impl OrchestratorClient {
         {
             Ok(v) => v,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!("Planner failed: {}", e))]);
+                return CallToolResult::error(vec![Content::text(format!(
+                    "Planner failed: {}",
+                    e
+                ))]);
             }
         };
 
