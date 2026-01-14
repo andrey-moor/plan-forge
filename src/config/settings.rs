@@ -46,7 +46,7 @@ pub struct OutputConfig {
     /// Defaults to .plan-forge/ (slug appended by CLI)
     pub runs_dir: PathBuf,
     /// Final output directory for committed plan files
-    /// Defaults to ./dev/active/
+    /// Defaults to ./plans/active/
     pub active_dir: PathBuf,
     /// Session slug (used for output directory name)
     /// If None, derived from plan title
@@ -151,7 +151,7 @@ impl Default for CliConfig {
             },
             output: OutputConfig {
                 runs_dir: PathBuf::from("./.plan-forge"),
-                active_dir: PathBuf::from("./dev/active"),
+                active_dir: PathBuf::from("./plans/active"),
                 slug: None,
             },
             guardrails: GuardrailsConfig::default(),
@@ -192,6 +192,7 @@ impl CliConfig {
     /// - PLAN_FORGE_ORCHESTRATOR_PROVIDER: Provider for orchestrator
     /// - PLAN_FORGE_ORCHESTRATOR_MODEL: Model for orchestrator
     /// - PLAN_FORGE_MAX_TOTAL_TOKENS: Maximum total tokens for orchestrator session
+    /// - PLAN_FORGE_PLAN_DIR: Output directory for plan files (default: plans/active)
     pub fn apply_env_overrides(mut self) -> Self {
         // Threshold (single source: guardrails.score_threshold)
         if let Ok(val) = std::env::var("PLAN_FORGE_THRESHOLD")
@@ -273,6 +274,13 @@ impl CliConfig {
             && let Ok(tokens) = val.parse::<u64>()
         {
             self.guardrails.max_total_tokens = tokens;
+        }
+
+        // Plan output directory
+        if let Ok(val) = std::env::var("PLAN_FORGE_PLAN_DIR")
+            && !val.is_empty()
+        {
+            self.output.active_dir = PathBuf::from(val);
         }
 
         self

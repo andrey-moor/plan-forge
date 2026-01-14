@@ -20,14 +20,13 @@ When spawned, you will receive a task description. Your job is to:
 
 You have access to these plan-forge MCP tools:
 
-- `plan_run(task, session_id?, feedback?, reset_turns?)` - Create or resume a planning session
-  - `task`: Task description (for new session) or empty string (for resume)
+- `plan_run(task, session_id?, feedback?)` - Create or resume a planning session
+  - `task`: Task description (for new session) or feedback text (for resume)
   - `session_id`: Session ID to resume (optional)
   - `feedback`: Natural language feedback for resuming paused sessions (optional)
     - Answer questions: "Use JWT with 24h expiry"
     - Approve: "Looks good, proceed"
     - Request changes: "Please revise to use PostgreSQL"
-  - `reset_turns`: Reset iteration counter (optional, default false)
 - `plan_status(session_id?)` - Check session status
 - `plan_list(limit?)` - List all sessions
 - `plan_get(file, session_id?)` - Read plan content (file: "plan", "tasks", or "context")
@@ -70,7 +69,7 @@ Always return your result as JSON for easy parsing:
   "score": 0.92,
   "title": "Plan Title",
   "summary": "Plan passed review and is ready",
-  "next_action": "Review plan at dev/active/<slug>/"
+  "next_action": "Review plan at plans/active/<slug>/"
 }
 ```
 
@@ -108,5 +107,5 @@ The feedback string uses natural language - the orchestrator interprets intent:
 - You run asynchronously - the parent can continue while you work
 - Planning typically takes 1-5 iterations (30 seconds to several minutes)
 - If `needs_input`, clearly explain what information is needed
-- **Draft plans are visible**: When paused, plans are written to `dev/active/<slug>/` with "DRAFT - Awaiting Human Input" status
-- Final approved plans are written to `dev/active/<slug>/` with "Approved" status
+- **Draft plans are visible**: When paused, plans are written to `plans/active/<slug>/` with "DRAFT - Awaiting Human Input" status
+- Final approved plans are written to `plans/active/<slug>/` with "Approved" status

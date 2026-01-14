@@ -96,7 +96,7 @@ cargo run -- run --path requirements.md
 cargo run -- run --path requirements.md --task "Focus on security aspects"
 
 # Resume from an existing plan with feedback
-cargo run -- run --path dev/active/my-task/ --task "Use JWT instead of sessions"
+cargo run -- run --path plans/active/my-task/ --task "Use JWT instead of sessions"
 
 # Verbose logging
 cargo run -- run --task "your task" --verbose
@@ -127,7 +127,7 @@ cargo run -- run --task "your task" --max-total-tokens -1
 | `--planner-provider` | | Override provider (anthropic, openai, litellm) |
 | `--reviewer-provider` | | Override provider for review |
 | `--max-iterations` | | Maximum iterations before stopping (default: 10) |
-| `--output` | `-o` | Output directory for plan files (default: ./dev/active) |
+| `--output` | `-o` | Output directory for plan files (default: ./plans/active) |
 | `--threshold` | | Review pass threshold 0.0-1.0 (default: 0.8) |
 | `--verbose` | `-v` | Enable debug logging |
 | `--orchestrator-model` | | Override orchestrator model |
@@ -164,6 +164,7 @@ cargo run -- run --task "your task" --max-total-tokens -1
 | `PLAN_FORGE_ORCHESTRATOR_PROVIDER` | Override orchestrator provider | - |
 | `PLAN_FORGE_ORCHESTRATOR_MODEL` | Override orchestrator model | - |
 | `PLAN_FORGE_RECIPE_DIR` | Directory to search for recipes | - |
+| `PLAN_FORGE_PLAN_DIR` | Output directory for plan files | plans/active |
 
 Environment variables override config file values but are themselves overridden by CLI arguments.
 
@@ -184,7 +185,7 @@ review:
 
 output:
   runs_dir: ./.plan-forge    # Session JSON files
-  active_dir: ./dev/active   # Final markdown output
+  active_dir: ./plans/active   # Final markdown output
 
 guardrails:
   max_iterations: 10         # Max plan-review cycles
@@ -512,7 +513,7 @@ Review pass/fail is determined deterministically: score >= threshold (default 0.
 2. **Hard Checks** validate plan structure (has phases, tasks, acceptance criteria)
 3. **Reviewer** evaluates gaps, clarity, and feasibility via LLM
 4. **Loop Controller** (or Orchestrator) decides: refine (score < threshold) or accept (score >= threshold)
-5. **Output** writes final markdown files to `./dev/active/<task-slug>/`
+5. **Output** writes final markdown files to `./plans/active/<task-slug>/`
 
 ### Output Structure
 
@@ -527,7 +528,7 @@ Review pass/fail is determined deterministically: score >= threshold (default 0.
 
 **Final output** (Markdown, committed):
 ```text
-./dev/active/<task-slug>/
+./plans/active/<task-slug>/
 ├── <task-slug>-plan.md      # Overview, phases, risks
 ├── <task-slug>-tasks.md     # Detailed task breakdown
 └── <task-slug>-context.md   # Context for handoff
@@ -582,7 +583,7 @@ Add to your project's `.mcp.json`:
 | `plan_status` | Get session status (ready/in_progress/needs_input/approved/max_turns) |
 | `plan_list` | List all planning sessions |
 | `plan_get` | Read plan, tasks, or context markdown files |
-| `plan_approve` | Force approve a plan and write to dev/active/ |
+| `plan_approve` | Force approve a plan and write to plans/active/ |
 
 **`plan_run` parameters:**
 

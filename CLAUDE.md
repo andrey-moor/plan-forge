@@ -18,10 +18,10 @@ cargo run -- run --path requirements.md
 cargo run -- run --path requirements.md --task "Focus on security"
 
 # Resume from existing plan directory
-cargo run -- run --path dev/active/my-task-slug/
+cargo run -- run --path plans/active/my-task-slug/
 
 # Resume with feedback
-cargo run -- run --path dev/active/my-task-slug/ --task "also add error handling"
+cargo run -- run --path plans/active/my-task-slug/ --task "also add error handling"
 
 # Run with verbose logging
 cargo run -- run --task "your task" --verbose
@@ -44,7 +44,7 @@ cargo clippy
 
 See [README.md#cli-options](README.md#cli-options) for full CLI reference. Key paths:
 - Session files: `.plan-forge/<task-slug>/`
-- Output files: `./dev/active/<task-slug>/`
+- Output files: `./plans/active/<task-slug>/`
 
 ### MCP Server
 

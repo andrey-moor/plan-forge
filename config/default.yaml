@@ -11,7 +11,7 @@ review:
 
 output:
   runs_dir: ./.plan-forge
-  active_dir: ./dev/active
+  active_dir: ./plans/active
 
 # Guardrails configuration for orchestrator mode
 guardrails:

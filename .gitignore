@@ -23,6 +23,10 @@ Thumbs.db
 # Local development - plan-forge session data
 .plan-forge/
 
+# Claude Code local configuration
+.claude/
+.mcp.json
+
 # Temporary files
 *.tmp
 *.bak
