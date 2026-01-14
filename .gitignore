@@ -4,6 +4,7 @@
 # Environment and secrets
 .env
 .envrc
+.direnv/
 
 # IDE and editor
 .idea/
@@ -20,7 +21,7 @@ Thumbs.db
 *.log
 
 # Local development - plan-forge session data
-.plan-forge/.goose/
+.plan-forge/
 
 # Temporary files
 *.tmp
