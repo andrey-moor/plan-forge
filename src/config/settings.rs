@@ -269,11 +269,15 @@ impl CliConfig {
             self.orchestrator.model_override = Some(val);
         }
 
-        // Max total tokens for orchestrator
+        // Max total tokens for orchestrator (-1 for unlimited)
         if let Ok(val) = std::env::var("PLAN_FORGE_MAX_TOTAL_TOKENS")
-            && let Ok(tokens) = val.parse::<u64>()
+            && let Ok(tokens) = val.parse::<i64>()
         {
-            self.guardrails.max_total_tokens = tokens;
+            self.guardrails.max_total_tokens = if tokens < 0 {
+                u64::MAX
+            } else {
+                tokens as u64
+            };
         }
 
         // Plan output directory

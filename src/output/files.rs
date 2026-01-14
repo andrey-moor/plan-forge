@@ -472,7 +472,7 @@ impl FileOutputWriter {
         fs::create_dir_all(&task_dir).await?;
 
         // Write single consolidated execution plan (matches reference plan format)
-        let plan_path = task_dir.join(format!("{}-execution-plan.md", task_name));
+        let plan_path = task_dir.join(format!("{}-plan.md", task_name));
         fs::write(&plan_path, self.plan_to_markdown_with_status(plan, is_draft)).await?;
         info!("Wrote {:?}", plan_path);
 
@@ -519,7 +519,7 @@ impl FileOutputWriter {
         fs::create_dir_all(&task_dir).await?;
 
         // Write single consolidated execution plan (matches reference plan format)
-        let plan_path = task_dir.join(format!("{}-execution-plan.md", task_name));
+        let plan_path = task_dir.join(format!("{}-plan.md", task_name));
         fs::write(&plan_path, self.plan_to_markdown_with_plan_status(plan, status)).await?;
         info!("Wrote {:?}", plan_path);
 

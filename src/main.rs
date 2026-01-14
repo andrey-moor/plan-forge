@@ -138,7 +138,7 @@ struct RunArgs {
     max_iterations: u32,
 
     /// Output directory for final plan files
-    #[arg(short, long, default_value = "./dev/active")]
+    #[arg(short, long, default_value = "./plans/active")]
     output: PathBuf,
 
     /// Explicit slug for directory/session naming (skips LLM generation)
@@ -490,6 +490,7 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     let orchestrator = GooseOrchestrator::new(
         config.orchestrator.clone(),
         config.guardrails.clone(),
+        config.output.clone(),
         base_dir.clone(),
         runs_dir.clone(),
         session_registry,

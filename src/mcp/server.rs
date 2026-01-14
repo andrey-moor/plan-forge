@@ -133,14 +133,14 @@ impl ServerHandler for PlanForgeServer {
             r#"Plan-Forge: AI-powered development planning tool.
 
 This server provides tools for creating, reviewing, and managing development plans.
-Plans are stored in .plan-forge/<session>/ and output to ./dev/active/<session>/.
+Plans are stored in .plan-forge/<session>/ and output to ./plans/active/<session>/.
 
 Available tools:
 - plan_run: Create a new planning session or resume an existing one
 - plan_status: Check the status of a planning session
 - plan_list: List all planning sessions
-- plan_get: Read plan, tasks, or context markdown files
-- plan_approve: Force approve a plan (write to dev/active/ even if review failed)
+- plan_get: Read plan or dag files
+- plan_approve: Force approve a plan (write to plans/active/ even if review failed)
 
 Current directory: {cwd}
 "#
@@ -349,12 +349,12 @@ impl PlanForgeServer {
         ]))
     }
 
-    /// Read plan content from dev/active/ directory.
+    /// Read plan content from plans/active/ directory.
     ///
-    /// Reads one of the plan markdown files: plan, tasks, or context.
+    /// Reads the plan markdown or DAG JSON file.
     #[tool(
         name = "plan_get",
-        description = "Read plan content. Specify file='plan', 'tasks', or 'context' to read the corresponding markdown file from dev/active/<session>/."
+        description = "Read plan content. Specify file='plan' for the markdown plan, or file='dag' for the JSON execution DAG."
     )]
     pub async fn plan_get(
         &self,
@@ -375,22 +375,18 @@ impl PlanForgeServer {
 
         let filename = match file_type.as_str() {
             "plan" => format!("{}-plan.md", slug),
-            "tasks" => format!("{}-tasks.md", slug),
-            "context" => format!("{}-context.md", slug),
+            "dag" => format!("{}-dag.json", slug),
             _ => {
                 return Err(ErrorData::new(
                     ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Invalid file type '{}'. Use 'plan', 'tasks', or 'context'.",
-                        file_type
-                    ),
+                    format!("Invalid file type '{}'. Use 'plan' or 'dag'.", file_type),
                     None,
                 ));
             }
         };
 
-        // Files are in dev/active/<slug>/<slug>-<type>.md
-        let file_path = self.base_dir.join("dev/active").join(&slug).join(&filename);
+        // Files are in plans/active/<slug>/<slug>-<type>.<ext>
+        let file_path = self.config.output.active_dir.join(&slug).join(&filename);
 
         let content = std::fs::read_to_string(&file_path).map_err(|e| {
             ErrorData::new(
@@ -432,12 +428,12 @@ impl PlanForgeServer {
         self.run_orchestrator(task, session_id, feedback).await
     }
 
-    /// Force approve a session and write to dev/active/.
+    /// Force approve a session and write to plans/active/.
     ///
     /// Use this to approve a plan even if it didn't pass review.
     #[tool(
         name = "plan_approve",
-        description = "Force approve a planning session and write output to dev/active/. Use when you want to proceed with a plan even if it didn't pass automated review."
+        description = "Force approve a planning session and write output to plans/active/. Use when you want to proceed with a plan even if it didn't pass automated review."
     )]
     pub async fn plan_approve(
         &self,
@@ -455,10 +451,10 @@ impl PlanForgeServer {
             .map(|m| m.slug)
             .unwrap_or_else(|_| slugify(&plan.title));
 
-        // Write to dev/active/ with the session slug
+        // Write to active_dir with the session slug
         let output = FileOutputWriter::new(OutputConfig {
             runs_dir: session_dir.clone(),
-            active_dir: self.base_dir.join("dev/active"),
+            active_dir: self.config.output.active_dir.clone(),
             slug: Some(slug.clone()),
         });
 
@@ -471,8 +467,9 @@ impl PlanForgeServer {
         })?;
 
         let response = format!(
-            "Plan '{}' approved and written to dev/active/{}/",
-            plan.title, slug
+            "Plan '{}' approved and written to {}/",
+            plan.title,
+            self.config.output.active_dir.join(&slug).display()
         );
 
         Ok(CallToolResult::success(vec![
@@ -645,6 +642,7 @@ impl PlanForgeServer {
         let orchestrator = GooseOrchestrator::new(
             self.config.orchestrator.clone(),
             self.config.guardrails.clone(),
+            self.config.output.clone(),
             self.base_dir.clone(),
             session_dir.clone(),
             self.session_registry.clone(),

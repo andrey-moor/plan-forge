@@ -70,6 +70,8 @@ pub struct GooseOrchestrator {
     config: OrchestratorConfig,
     /// Guardrails configuration
     guardrails_config: GuardrailsConfig,
+    /// Output configuration (paths for plan files)
+    output_config: OutputConfig,
     /// Base directory for the project
     base_dir: PathBuf,
     /// Session directory for orchestrator state
@@ -83,6 +85,7 @@ impl GooseOrchestrator {
     pub fn new(
         config: OrchestratorConfig,
         guardrails_config: GuardrailsConfig,
+        output_config: OutputConfig,
         base_dir: PathBuf,
         runs_dir: PathBuf,
         session_registry: Arc<SessionRegistry>,
@@ -90,6 +93,7 @@ impl GooseOrchestrator {
         Self {
             config,
             guardrails_config,
+            output_config,
             base_dir,
             session_dir: runs_dir,
             session_registry,
@@ -433,7 +437,7 @@ impl GooseOrchestrator {
         };
         final_state.save(&session_dir)?;
 
-        // Write plan to dev/active/ for completed, best-effort, and paused states
+        // Write plan to active_dir for completed, best-effort, and paused states
         // - Completed: Final approved plan (passed review)
         // - CompletedBestEffort: Best plan seen (did not pass review threshold)
         // - Paused: Draft plan for user review before providing feedback
@@ -457,7 +461,7 @@ impl GooseOrchestrator {
                     Ok(plan) => {
                         let output_config = OutputConfig {
                             runs_dir: session_dir.clone(),
-                            active_dir: self.base_dir.join("dev/active"),
+                            active_dir: self.output_config.active_dir.clone(),
                             slug: Some(final_state.task_slug.clone()),
                         };
                         let output = FileOutputWriter::new(output_config);
@@ -473,7 +477,7 @@ impl GooseOrchestrator {
                         };
 
                         if let Err(e) = output.write_final_with_plan_status(&plan, output_status).await {
-                            warn!("Failed to write plan to dev/active/: {}", e);
+                            warn!("Failed to write plan to {}: {}", self.output_config.active_dir.display(), e);
                         }
                     }
                     Err(e) => {

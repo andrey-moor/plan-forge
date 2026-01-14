@@ -86,6 +86,24 @@ export PLAN_FORGE_REVIEWER_MODEL=claude-opus-4-5
 plan-forge mcp plan-forge
 ```
 
+## Skills Routing (Claude Code Integration)
+
+When users request development plans in natural conversation, **ALWAYS invoke the `auto-plan` skill** instead of calling MCP tools directly.
+
+**Trigger phrases:**
+- "create a plan for...", "plan this task...", "make a development plan..."
+- "I need a plan for...", "generate a plan for...", "plan out..."
+
+**Action:** `Skill(skill="auto-plan", args="<task description>")`
+
+The skill spawns a `plan-forge` subagent in the background, providing better UX (immediate response, non-blocking).
+
+**Direct MCP tool usage is OK for management commands:**
+- `/plan status` - checking status
+- `/plan list` - listing sessions
+- `/plan get` - reading plan content
+- `/plan approve` - approving plans
+
 ## Architecture
 
 This is a Rust CLI tool that uses the `goose` crate to run an iterative plan-review feedback loop. It generates development plans using an LLM, reviews them, and refines based on feedback.
