@@ -4,12 +4,19 @@
 //! - CLAUDE.md: Simple headers, Cargo build system → CLAUDE-xxx rule IDs
 //! - AGENT.md: Emoji headers, structured sections, Bazel → BZL-xxx, AGENT-xxx rule IDs
 
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::models::Instruction;
+
+/// Pattern to extract rules with strong keywords (CRITICAL, ALWAYS, NEVER, MUST, DO NOT)
+static KEYWORD_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(CRITICAL|ALWAYS|NEVER|MUST|DO NOT)[:\s]+([^\n]+)")
+        .expect("invalid KEYWORD_RE regex")
+});
 
 // ============================================================================
 // Policy Types
@@ -443,9 +450,7 @@ pub fn extract_claude_md_policies(content: &str, source_path: &str) -> Vec<Polic
     }
 
     // Extract rules from sections with strong keywords
-    let keyword_re = Regex::new(r"(?i)(CRITICAL|ALWAYS|NEVER|MUST|DO NOT)[:\s]+([^\n]+)").unwrap();
-
-    for cap in keyword_re.captures_iter(content) {
+    for cap in KEYWORD_RE.captures_iter(content) {
         let keyword = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         let rule_text = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("");
 

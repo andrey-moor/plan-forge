@@ -3,21 +3,21 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{debug, info};
 
 use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::Message;
-use goose::providers::{base::Provider, create_with_named_model};
-use goose::recipe::Recipe;
-use goose::session::{SessionManager, session_manager::SessionType};
+use goose::session::SessionManager;
 
 use crate::config::PlanningConfig;
 use crate::models::Plan;
-use crate::orchestrator::{LoopState, TokenUsage};
+use crate::orchestrator::TokenUsage;
 use crate::recipes::load_recipe;
 
-use super::Planner;
+use super::{
+    create_provider, resolve_working_dir, setup_agent_session, extract_json_block,
+    Planner, PlanningContext, ProviderConfig,
+};
 
 /// Planner implementation using goose Agent
 pub struct GoosePlanner {
@@ -30,74 +30,30 @@ impl GoosePlanner {
         Self { config, base_dir }
     }
 
-    async fn create_provider(&self, recipe: &Recipe) -> Result<Arc<dyn Provider>> {
-        // Use override if provided, otherwise use recipe settings
-        let provider_name = self
-            .config
-            .provider_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_provider.as_deref()))
-            .unwrap_or("anthropic");
-
-        let model_name = self
-            .config
-            .model_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_model.as_deref()))
-            .unwrap_or("claude-opus-4-5-20251101");
-
-        info!(
-            "Creating provider: {} with model: {}",
-            provider_name, model_name
-        );
-        create_with_named_model(provider_name, model_name)
-            .await
-            .context("Failed to create provider")
-    }
-
-    async fn run_agent(&self, prompt: &str, state: &LoopState) -> Result<String> {
+    async fn run_agent(&self, prompt: &str, ctx: &PlanningContext) -> Result<String> {
         // Load recipe (with fallback to bundled default)
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "planner")?;
 
-        // Create provider
-        let provider = self.create_provider(&recipe).await?;
+        // Create provider using shared utility
+        let provider_config = ProviderConfig::for_planner(
+            self.config.provider_override.as_deref(),
+            self.config.model_override.as_deref(),
+        );
+        let provider = create_provider(&provider_config, &recipe).await?;
 
-        // Create agent
+        // Create agent and session using shared utility
         let agent = Agent::new();
-
-        // Create session
-        let working_dir = state
-            .conversation_context
-            .working_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        let session = SessionManager::create_session(
-            working_dir.clone(),
-            format!("planner-iteration-{}", state.iteration),
-            SessionType::Hidden,
+        let working_dir = resolve_working_dir(ctx.working_dir.as_deref());
+        let session_name = format!("planner-iteration-{}", ctx.iteration);
+        let session = setup_agent_session(
+            &agent,
+            &recipe,
+            provider,
+            &working_dir,
+            &session_name,
+            "planner",
         )
-        .await
-        .context("Failed to create session")?;
-
-        // Set provider
-        agent.update_provider(provider, &session.id).await?;
-
-        // Add extensions from recipe
-        if let Some(extensions) = &recipe.extensions {
-            for extension in extensions {
-                if let Err(e) = agent.add_extension(extension.clone()).await {
-                    tracing::warn!("Failed to add extension: {:?}", e);
-                }
-            }
-        }
+        .await?;
 
         // Apply recipe components (sub_recipes, response schema)
         // Enable final_output_tool for schema-validated structured output
@@ -149,7 +105,7 @@ impl GoosePlanner {
         Ok(last_message)
     }
 
-    fn build_initial_prompt(&self, state: &LoopState) -> String {
+    fn build_initial_prompt(&self, ctx: &PlanningContext) -> String {
         format!(
             r#"Create a comprehensive development plan for the following task:
 
@@ -216,12 +172,12 @@ Return a JSON object with the following structure:
 }}
 ```
 "#,
-            state.conversation_context.original_task
+            ctx.task
         )
     }
 
-    fn build_update_prompt(&self, state: &LoopState, current_plan: &Plan) -> String {
-        let feedback = state.conversation_context.pending_feedback.join("\n");
+    fn build_update_prompt(&self, ctx: &PlanningContext, current_plan: &Plan) -> String {
+        let feedback = ctx.pending_feedback.join("\n");
         let plan_json = serde_json::to_string_pretty(current_plan).unwrap_or_default();
 
         format!(
@@ -248,7 +204,7 @@ Return a JSON object with the following structure:
 
 Return ONLY the updated JSON plan.
 "#,
-            state.conversation_context.original_task, plan_json, feedback
+            ctx.task, plan_json, feedback
         )
     }
 
@@ -324,32 +280,30 @@ Return ONLY the JSON plan.
         // Load recipe
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "planner")?;
 
-        // Create provider and agent
-        let provider = self.create_provider(&recipe).await?;
+        // Create provider using shared utility
+        let provider_config = ProviderConfig::for_planner(
+            self.config.provider_override.as_deref(),
+            self.config.model_override.as_deref(),
+        );
+        let provider = create_provider(&provider_config, &recipe).await?;
+
+        // Create agent and session using shared utility
         let agent = Agent::new();
-
         let wd = working_dir
-            .map(PathBuf::from)
+            .map(std::path::Path::new)
+            .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        let session = SessionManager::create_session(
-            wd.clone(),
-            format!("orchestrator-planner-{}", chrono::Utc::now().timestamp()),
-            SessionType::Hidden,
+        let session_name = format!("orchestrator-planner-{}", chrono::Utc::now().timestamp());
+        let session = setup_agent_session(
+            &agent,
+            &recipe,
+            provider,
+            &wd,
+            &session_name,
+            "planner",
         )
-        .await
-        .context("Failed to create planner session")?;
-
+        .await?;
         let session_id = session.id.clone();
-        agent.update_provider(provider, &session_id).await?;
-
-        if let Some(extensions) = &recipe.extensions {
-            for extension in extensions {
-                if let Err(e) = agent.add_extension(extension.clone()).await {
-                    tracing::warn!("Failed to add extension: {:?}", e);
-                }
-            }
-        }
 
         agent
             .apply_recipe_components(recipe.sub_recipes.clone(), recipe.response.clone(), true)
@@ -409,20 +363,20 @@ Return ONLY the JSON plan.
 
 #[async_trait]
 impl Planner for GoosePlanner {
-    async fn generate_plan(&self, state: &LoopState) -> Result<Plan> {
-        let prompt = if state.is_first_iteration() {
+    async fn generate_plan(&self, ctx: &PlanningContext) -> Result<Plan> {
+        let prompt = if ctx.iteration == 1 && ctx.current_plan.is_none() {
             info!("Generating initial plan");
-            self.build_initial_prompt(state)
+            self.build_initial_prompt(ctx)
         } else {
             info!("Updating plan based on feedback");
-            let current_plan = state
+            let current_plan = ctx
                 .current_plan
                 .as_ref()
                 .context("No current plan for update")?;
-            self.build_update_prompt(state, current_plan)
+            self.build_update_prompt(ctx, current_plan)
         };
 
-        let response = self.run_agent(&prompt, state).await?;
+        let response = self.run_agent(&prompt, ctx).await?;
         parse_plan_from_response(&response)
     }
 }
@@ -441,24 +395,4 @@ fn parse_plan_from_response(response: &str) -> Result<Plan> {
     } else {
         serde_json::from_str(response).context("Response is not valid JSON")
     }
-}
-
-/// Extract JSON block from markdown-formatted response (fallback)
-fn extract_json_block(text: &str) -> Option<&str> {
-    // Look for ```json ... ``` blocks
-    if let Some(start) = text.find("```json") {
-        let content_start = start + 7;
-        if let Some(end) = text[content_start..].find("```") {
-            return Some(text[content_start..content_start + end].trim());
-        }
-    }
-
-    // Try finding raw JSON object
-    if let Some(start) = text.find('{')
-        && let Some(end) = text.rfind('}')
-    {
-        return Some(&text[start..=end]);
-    }
-
-    None
 }

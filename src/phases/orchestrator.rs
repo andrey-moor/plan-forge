@@ -15,9 +15,9 @@ use tracing::{debug, info, warn};
 
 use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::{Message, MessageContent};
-use goose::providers::{base::Provider, create_with_named_model};
-use goose::recipe::Recipe;
 use goose::session::{session_manager::SessionType, SessionManager};
+
+use super::{create_provider, ProviderConfig};
 
 use crate::config::{GuardrailsConfig, OrchestratorConfig, OutputConfig};
 use crate::models::Plan;
@@ -96,37 +96,6 @@ impl GooseOrchestrator {
         }
     }
 
-    /// Create the LLM provider for the orchestrator agent.
-    async fn create_provider(&self, recipe: &Recipe) -> Result<Arc<dyn Provider>> {
-        let provider_name = self
-            .config
-            .provider_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_provider.as_deref()))
-            .unwrap_or("anthropic");
-
-        let model_name = self
-            .config
-            .model_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_model.as_deref()))
-            .unwrap_or("claude-sonnet-4-20250514");
-
-        info!(
-            "Creating orchestrator provider: {} with model: {}",
-            provider_name, model_name
-        );
-        create_with_named_model(provider_name, model_name)
-            .await
-            .context("Failed to create orchestrator provider")
-    }
-
     /// Run the orchestrator for a task.
     ///
     /// # Arguments
@@ -170,10 +139,8 @@ impl GooseOrchestrator {
         let planner_model = std::env::var("PLAN_FORGE_PLANNER_MODEL").ok();
         let reviewer_provider = std::env::var("PLAN_FORGE_REVIEWER_PROVIDER").ok();
         let reviewer_model = std::env::var("PLAN_FORGE_REVIEWER_MODEL").ok();
-        let pass_threshold: f32 = std::env::var("PLAN_FORGE_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.8);
+        // Use score_threshold from guardrails config (single source of truth)
+        let score_threshold = self.guardrails_config.score_threshold;
 
         let planner = Arc::new(GoosePlanner::new(
             crate::config::PlanningConfig {
@@ -189,9 +156,9 @@ impl GooseOrchestrator {
                 recipe: PathBuf::from("recipes/reviewer.yaml"),
                 provider_override: reviewer_provider,
                 model_override: reviewer_model,
-                pass_threshold,
             },
             self.base_dir.clone(),
+            score_threshold,
         ));
 
         // Check for existing state (resume scenario)
@@ -253,7 +220,11 @@ impl GooseOrchestrator {
 
         // Load orchestrator recipe and create provider (shared across iterations)
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "orchestrator")?;
-        let provider = self.create_provider(&recipe).await?;
+        let provider_config = ProviderConfig::for_orchestrator(
+            self.config.provider_override.as_deref(),
+            self.config.model_override.as_deref(),
+        );
+        let provider = create_provider(&provider_config, &recipe).await?;
 
         // Run agent with timeout
         let timeout_duration =

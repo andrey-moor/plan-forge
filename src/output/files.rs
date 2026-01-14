@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::config::OutputConfig;
 use crate::models::{GroundingGate, GroundingSnapshot, Instruction, Plan, ReviewResult};
-use crate::orchestrator::viability::{DagMetrics, ViabilityChecker};
+use crate::orchestrator::viability::{analyze_dag, DagMetrics};
 use crate::slugify;
 
 use super::OutputWriter;
@@ -344,8 +344,7 @@ impl FileOutputWriter {
         md.push_str("### Execution Instructions (ISA)\n\n");
 
         // Compute and show DAG parallelization metrics
-        let checker = ViabilityChecker::new();
-        let metrics = checker.analyze_dag(instructions);
+        let metrics = analyze_dag(instructions);
         self.render_dag_metrics(&mut md, &metrics);
 
         // Mermaid DAG diagram

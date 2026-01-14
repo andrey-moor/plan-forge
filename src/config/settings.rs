@@ -6,7 +6,6 @@ use std::path::PathBuf;
 pub struct CliConfig {
     pub planning: PlanningConfig,
     pub review: ReviewConfig,
-    pub loop_config: LoopConfig,
     pub output: OutputConfig,
     /// Guardrails configuration for orchestrator mode
     #[serde(default)]
@@ -14,14 +13,8 @@ pub struct CliConfig {
     /// Orchestrator mode configuration
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
-    /// Use LLM-powered orchestrator (default: true).
-    /// Set to false to use deprecated LoopController.
-    #[serde(default = "default_use_orchestrator")]
-    pub use_orchestrator: bool,
-}
-
-fn default_use_orchestrator() -> bool {
-    true
+    // NOTE: loop_config and use_orchestrator removed.
+    // Use guardrails.max_iterations and guardrails.score_threshold instead.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,17 +35,10 @@ pub struct ReviewConfig {
     pub provider_override: Option<String>,
     /// Override model from recipe
     pub model_override: Option<String>,
-    /// Minimum score (0.0-1.0) to pass review
-    pub pass_threshold: f32,
+    // NOTE: pass_threshold was removed. Use guardrails.score_threshold instead.
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopConfig {
-    /// Maximum iterations before giving up
-    pub max_iterations: u32,
-    /// Exit early if review score is perfect (1.0)
-    pub early_exit_on_perfect_score: bool,
-}
+// NOTE: LoopConfig struct removed. Use GuardrailsConfig.max_iterations instead.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
@@ -162,11 +148,6 @@ impl Default for CliConfig {
                 recipe: PathBuf::from("recipes/reviewer.yaml"),
                 provider_override: None,
                 model_override: None,
-                pass_threshold: 0.8,
-            },
-            loop_config: LoopConfig {
-                max_iterations: 5,
-                early_exit_on_perfect_score: true,
             },
             output: OutputConfig {
                 runs_dir: PathBuf::from("./.plan-forge"),
@@ -175,7 +156,6 @@ impl Default for CliConfig {
             },
             guardrails: GuardrailsConfig::default(),
             orchestrator: OrchestratorConfig::default(),
-            use_orchestrator: default_use_orchestrator(),
         }
     }
 }
@@ -202,38 +182,29 @@ impl CliConfig {
     /// but are themselves overridden by CLI arguments.
     ///
     /// Supported environment variables:
-    /// - PLAN_FORGE_THRESHOLD: Review pass threshold (0.0-1.0)
+    /// - PLAN_FORGE_THRESHOLD: Score threshold for review pass/fail (0.0-1.0)
     /// - PLAN_FORGE_MAX_ITERATIONS: Maximum planning iterations
     /// - PLAN_FORGE_PLANNER_PROVIDER: Provider for planner (e.g., "anthropic")
     /// - PLAN_FORGE_PLANNER_MODEL: Model for planner
     /// - PLAN_FORGE_REVIEWER_PROVIDER: Provider for reviewer
     /// - PLAN_FORGE_REVIEWER_MODEL: Model for reviewer
     /// - PLAN_FORGE_RECIPE_DIR: Directory to search for recipes
-    /// - PLAN_FORGE_USE_ORCHESTRATOR: Enable orchestrator mode (true/false)
     /// - PLAN_FORGE_ORCHESTRATOR_PROVIDER: Provider for orchestrator
     /// - PLAN_FORGE_ORCHESTRATOR_MODEL: Model for orchestrator
     /// - PLAN_FORGE_MAX_TOTAL_TOKENS: Maximum total tokens for orchestrator session
     pub fn apply_env_overrides(mut self) -> Self {
-        // Threshold
-        if let Ok(val) = std::env::var("PLAN_FORGE_THRESHOLD")
-            && let Ok(threshold) = val.parse::<f32>()
-        {
-            self.review.pass_threshold = threshold.clamp(0.0, 1.0);
-        }
-
-        // Max iterations (applies to both legacy loop and orchestrator)
-        if let Ok(val) = std::env::var("PLAN_FORGE_MAX_ITERATIONS")
-            && let Ok(max) = val.parse::<u32>()
-        {
-            self.loop_config.max_iterations = max;
-            self.guardrails.max_iterations = max;
-        }
-
-        // Also apply threshold to guardrails (orchestrator mode uses guardrails config)
+        // Threshold (single source: guardrails.score_threshold)
         if let Ok(val) = std::env::var("PLAN_FORGE_THRESHOLD")
             && let Ok(threshold) = val.parse::<f32>()
         {
             self.guardrails.score_threshold = threshold.clamp(0.0, 1.0);
+        }
+
+        // Max iterations
+        if let Ok(val) = std::env::var("PLAN_FORGE_MAX_ITERATIONS")
+            && let Ok(max) = val.parse::<u32>()
+        {
+            self.guardrails.max_iterations = max;
         }
 
         // Planner provider
@@ -281,12 +252,7 @@ impl CliConfig {
             }
         }
 
-        // Orchestrator mode
-        if let Ok(val) = std::env::var("PLAN_FORGE_USE_ORCHESTRATOR")
-            && !val.is_empty()
-        {
-            self.use_orchestrator = val.parse().unwrap_or(false) || val.eq_ignore_ascii_case("true");
-        }
+        // NOTE: PLAN_FORGE_USE_ORCHESTRATOR removed. Orchestrator mode is always enabled.
 
         // Orchestrator provider
         if let Ok(val) = std::env::var("PLAN_FORGE_ORCHESTRATOR_PROVIDER")
@@ -327,5 +293,12 @@ impl CliConfig {
         let provider = self.orchestrator.provider_override.clone()?;
         let model = self.orchestrator.model_override.clone()?;
         Some((provider, model))
+    }
+
+    /// Get the score threshold for review pass/fail.
+    ///
+    /// Single source of truth for threshold configuration.
+    pub fn score_threshold(&self) -> f32 {
+        self.guardrails.score_threshold
     }
 }

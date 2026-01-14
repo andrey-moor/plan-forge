@@ -130,7 +130,6 @@ cargo run -- run --task "your task" --max-total-tokens -1
 | `--output` | `-o` | Output directory for plan files (default: ./dev/active) |
 | `--threshold` | | Review pass threshold 0.0-1.0 (default: 0.8) |
 | `--verbose` | `-v` | Enable debug logging |
-| `--use-legacy-loop` | | Use deprecated LoopController instead of LLM-powered orchestrator |
 | `--orchestrator-model` | | Override orchestrator model |
 | `--orchestrator-provider` | | Override orchestrator provider |
 | `--max-total-tokens` | | Maximum total tokens for orchestrator session (-1 for unlimited) |
@@ -182,15 +181,15 @@ review:
   recipe: recipes/reviewer.yaml
   provider_override: null
   model_override: null
-  pass_threshold: 0.8        # Score needed to pass review (0.0-1.0)
-
-loop_config:
-  max_iterations: 5          # Max plan-review cycles
-  early_exit_on_perfect_score: true
 
 output:
   runs_dir: ./.plan-forge    # Session JSON files
   active_dir: ./dev/active   # Final markdown output
+
+guardrails:
+  max_iterations: 10         # Max plan-review cycles
+  max_total_tokens: 500000   # Token budget
+  score_threshold: 0.8       # Score needed to pass review (0.0-1.0)
 ```
 
 ### Recipe Customization
@@ -477,9 +476,6 @@ cargo run -- run --task "your task" --max-total-tokens 100000
 
 # Unlimited tokens
 cargo run -- run --task "your task" --max-total-tokens -1
-
-# Use legacy loop controller instead (deprecated)
-cargo run -- run --task "your task" --use-legacy-loop
 ```
 
 **With LiteLLM proxy:**

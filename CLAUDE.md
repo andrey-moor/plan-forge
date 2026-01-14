@@ -26,11 +26,8 @@ cargo run -- run --path dev/active/my-task-slug/ --task "also add error handling
 # Run with verbose logging
 cargo run -- run --task "your task" --verbose
 
-# Orchestrator with token budget limit (orchestrator is the default mode)
+# Orchestrator with token budget limit
 cargo run -- run --task "your task" --max-total-tokens 100000
-
-# Run with legacy loop controller (deprecated)
-cargo run -- run --task "your task" --use-legacy-loop
 
 # Run tests
 cargo test
@@ -135,9 +132,15 @@ The `GooseOrchestrator` (default) orchestrates this cycle until either:
 ### Key Components
 
 - **GooseOrchestrator** (`src/phases/orchestrator.rs`): LLM-powered orchestrator with guardrails. Uses goose Agent with in-process MCP extension pattern for dynamic workflow decisions.
-- **LoopController** (`src/orchestrator/loop_controller.rs`): [Deprecated] Legacy deterministic loop controller
 - **OrchestratorClient** (`src/orchestrator/client.rs`): MCP client implementing tool handlers for plan generation, review, and human input. Registered via ExtensionManager.
-- **ViabilityChecker** (`src/orchestrator/viability.rs`): Deterministic V-* checks (V-001 to V-013) for instruction structure validation
+- **ViabilityChecker** (`src/orchestrator/viability/`): Deterministic V-* checks (V-001 to V-014) for instruction structure validation. Split into focused modules:
+  - `mod.rs`: Main checker and `check_all` entry point
+  - `types.rs`: Core types (ViabilityViolation, ViabilityResult)
+  - `dag.rs`: V-001, V-002 (dependency/cycle validation)
+  - `instruction.rs`: V-004, V-005, V-009, V-013, V-014 (instruction params)
+  - `dataflow.rs`: V-006, V-007, V-008 (variable refs, TDD order)
+  - `grounding.rs`: V-003, V-011 (file existence, context order)
+  - `metrics.rs`: V-010, V-012 (DAG analysis, token estimates)
 - **Guardrails** (`src/orchestrator/guardrails.rs`): Enforces hard stops for token budget, max iterations, and execution timeout. Score threshold checked deterministically.
 - **Planner trait** (`src/phases/mod.rs`): Interface for plan generation. `GoosePlanner` uses goose Agent with recipes
 - **Reviewer trait** (`src/phases/mod.rs`): Interface for plan review. `GooseReviewer` validates plans and produces structured feedback

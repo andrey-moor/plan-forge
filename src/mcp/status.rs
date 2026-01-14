@@ -111,7 +111,7 @@ pub struct PendingHumanInput {
 /// - InProgress: Has plan files, none of the above
 pub fn derive_status(
     session_dir: &Path,
-    pass_threshold: f32,
+    score_threshold: f32,
     max_iterations: u32,
 ) -> anyhow::Result<SessionInfo> {
     use crate::orchestrator::OrchestrationState;
@@ -128,7 +128,7 @@ pub fn derive_status(
     }
 
     // Fall back to legacy file-based derivation
-    derive_legacy_status(session_id, session_dir, pass_threshold, max_iterations)
+    derive_legacy_status(session_id, session_dir, score_threshold, max_iterations)
 }
 
 /// Derive status from orchestration state file.
@@ -206,7 +206,7 @@ fn derive_orchestrator_status(
 fn derive_legacy_status(
     session_id: String,
     session_dir: &Path,
-    pass_threshold: f32,
+    score_threshold: f32,
     max_iterations: u32,
 ) -> anyhow::Result<SessionInfo> {
     // Find highest plan iteration
@@ -241,7 +241,7 @@ fn derive_legacy_status(
             if review.llm_review.requires_human_input {
                 let reason = review.llm_review.human_input_reason.clone();
                 (SessionStatus::NeedsInput, Some(score), reason)
-            } else if score >= pass_threshold && !review.llm_review.requires_human_input {
+            } else if score >= score_threshold && !review.llm_review.requires_human_input {
                 (SessionStatus::Approved, Some(score), None)
             } else if review_iteration >= max_iterations {
                 (SessionStatus::MaxTurns, Some(score), None)

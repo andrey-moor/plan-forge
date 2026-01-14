@@ -3,105 +3,65 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{debug, info};
 
 use goose::agents::{Agent, AgentEvent, SessionConfig};
 use goose::conversation::message::Message;
-use goose::providers::{base::Provider, create_with_named_model};
-use goose::recipe::Recipe;
-use goose::session::{SessionManager, session_manager::SessionType};
+use goose::session::SessionManager;
 
 use crate::config::{HardChecklist, ReviewConfig};
 use crate::models::{LlmReview, Plan, ReviewResult};
-use crate::orchestrator::{LoopState, TokenUsage};
+use crate::orchestrator::TokenUsage;
 use crate::recipes::load_recipe;
 
-use super::Reviewer;
+use super::{
+    create_provider, resolve_working_dir, setup_agent_session, extract_json_block,
+    ProviderConfig, ReviewContext, Reviewer,
+};
 
 /// Reviewer implementation using goose Agent with hard checklist
 pub struct GooseReviewer {
     config: ReviewConfig,
     checklist: HardChecklist,
     base_dir: PathBuf,
+    /// Score threshold for passing review (from guardrails.score_threshold)
+    score_threshold: f32,
 }
 
 impl GooseReviewer {
-    pub fn new(config: ReviewConfig, base_dir: PathBuf) -> Self {
+    pub fn new(config: ReviewConfig, base_dir: PathBuf, score_threshold: f32) -> Self {
         Self {
             config,
             checklist: HardChecklist::default(),
             base_dir,
+            score_threshold,
         }
     }
 
-    async fn create_provider(&self, recipe: &Recipe) -> Result<Arc<dyn Provider>> {
-        let provider_name = self
-            .config
-            .provider_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_provider.as_deref()))
-            .unwrap_or("anthropic");
-
-        let model_name = self
-            .config
-            .model_override
-            .as_deref()
-            .or(recipe
-                .settings
-                .as_ref()
-                .and_then(|s| s.goose_model.as_deref()))
-            .unwrap_or("claude-opus-4-5-20251101");
-
-        info!(
-            "Creating reviewer provider: {} with model: {}",
-            provider_name, model_name
-        );
-        create_with_named_model(provider_name, model_name)
-            .await
-            .context("Failed to create reviewer provider")
-    }
-
-    async fn run_llm_review(&self, plan: &Plan, state: &LoopState) -> Result<LlmReview> {
+    async fn run_llm_review(&self, plan: &Plan, ctx: &ReviewContext) -> Result<LlmReview> {
         // Load recipe (with fallback to bundled default)
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "reviewer")?;
 
-        // Create provider
-        let provider = self.create_provider(&recipe).await?;
+        // Create provider using shared utility
+        let provider_config = ProviderConfig::for_reviewer(
+            self.config.provider_override.as_deref(),
+            self.config.model_override.as_deref(),
+        );
+        let provider = create_provider(&provider_config, &recipe).await?;
 
-        // Create agent
+        // Create agent and session using shared utility
         let agent = Agent::new();
-
-        // Create session
-        let working_dir = state
-            .conversation_context
-            .working_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        let session = SessionManager::create_session(
-            working_dir.clone(),
-            format!("reviewer-iteration-{}", state.iteration),
-            SessionType::Hidden,
+        let working_dir = resolve_working_dir(ctx.working_dir.as_deref());
+        let session_name = format!("reviewer-iteration-{}", ctx.iteration);
+        let session = setup_agent_session(
+            &agent,
+            &recipe,
+            provider,
+            &working_dir,
+            &session_name,
+            "reviewer",
         )
-        .await
-        .context("Failed to create reviewer session")?;
-
-        // Set provider
-        agent.update_provider(provider, &session.id).await?;
-
-        // Add extensions from recipe
-        if let Some(extensions) = &recipe.extensions {
-            for extension in extensions {
-                if let Err(e) = agent.add_extension(extension.clone()).await {
-                    tracing::warn!("Failed to add reviewer extension: {:?}", e);
-                }
-            }
-        }
+        .await?;
 
         // Apply recipe components
         // Enable final_output_tool for schema-validated structured output
@@ -236,30 +196,28 @@ Score guidelines:
         // Load recipe
         let recipe = load_recipe(&self.config.recipe, &self.base_dir, "reviewer")?;
 
-        // Create provider and agent
-        let provider = self.create_provider(&recipe).await?;
+        // Create provider using shared utility
+        let provider_config = ProviderConfig::for_reviewer(
+            self.config.provider_override.as_deref(),
+            self.config.model_override.as_deref(),
+        );
+        let provider = create_provider(&provider_config, &recipe).await?;
+
+        // Create agent and session using shared utility
         let agent = Agent::new();
-
-        let wd = std::env::current_dir().unwrap_or_default();
-
-        let session = SessionManager::create_session(
-            wd.clone(),
-            format!("orchestrator-reviewer-{}", chrono::Utc::now().timestamp()),
-            SessionType::Hidden,
+        let working_dir = resolve_working_dir(None);
+        let session_name = format!("orchestrator-reviewer-{}", chrono::Utc::now().timestamp());
+        let session = setup_agent_session(
+            &agent,
+            &recipe,
+            provider,
+            &working_dir,
+            &session_name,
+            "reviewer",
         )
-        .await
-        .context("Failed to create reviewer session")?;
+        .await?;
 
         let session_id = session.id.clone();
-        agent.update_provider(provider, &session_id).await?;
-
-        if let Some(extensions) = &recipe.extensions {
-            for extension in extensions {
-                if let Err(e) = agent.add_extension(extension.clone()).await {
-                    tracing::warn!("Failed to add reviewer extension: {:?}", e);
-                }
-            }
-        }
 
         agent
             .apply_recipe_components(recipe.sub_recipes.clone(), recipe.response.clone(), true)
@@ -327,7 +285,7 @@ Score guidelines:
 
         // Add passed field based on score and threshold
         let score = review_json.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-        let passed = score >= self.config.pass_threshold;
+        let passed = score >= self.score_threshold;
 
         let mut result = review_json;
         if let Some(obj) = result.as_object_mut() {
@@ -337,7 +295,7 @@ Score guidelines:
                 Value::String(format!(
                     "Review score: {:.2} (threshold: {:.2}) - {}",
                     score,
-                    self.config.pass_threshold,
+                    self.score_threshold,
                     if passed { "PASSED" } else { "NEEDS REVISION" }
                 )),
             );
@@ -349,8 +307,8 @@ Score guidelines:
 
 #[async_trait]
 impl Reviewer for GooseReviewer {
-    async fn review_plan(&self, plan: &Plan, state: &LoopState) -> Result<ReviewResult> {
-        info!("Running review for iteration {}", state.iteration);
+    async fn review_plan(&self, plan: &Plan, ctx: &ReviewContext) -> Result<ReviewResult> {
+        info!("Running review for iteration {}", ctx.iteration);
 
         // Step 1: Run hard checks (fast, deterministic)
         info!("Running hard validation checks...");
@@ -368,16 +326,16 @@ impl Reviewer for GooseReviewer {
 
         // Step 2: Run LLM qualitative review
         info!("Running LLM review...");
-        let llm_review = self.run_llm_review(plan, state).await?;
+        let llm_review = self.run_llm_review(plan, ctx).await?;
         info!("LLM review score: {:.2}", llm_review.score);
 
         // Calculate if passed
-        let passed = hard_failures.is_empty() && llm_review.score >= self.config.pass_threshold;
+        let passed = hard_failures.is_empty() && llm_review.score >= self.score_threshold;
 
         let summary = if passed {
             format!(
                 "Plan PASSED review with score {:.2} (threshold: {:.2})",
-                llm_review.score, self.config.pass_threshold
+                llm_review.score, self.score_threshold
             )
         } else {
             format!(
@@ -385,7 +343,7 @@ impl Reviewer for GooseReviewer {
                 hard_failures.len(),
                 llm_review.gaps.len(),
                 llm_review.score,
-                self.config.pass_threshold
+                self.score_threshold
             )
         };
 
@@ -418,21 +376,4 @@ fn parse_llm_review(response: &str) -> Result<LlmReview> {
             ..Default::default()
         })
     }
-}
-
-fn extract_json_block(text: &str) -> Option<&str> {
-    if let Some(start) = text.find("```json") {
-        let content_start = start + 7;
-        if let Some(end) = text[content_start..].find("```") {
-            return Some(text[content_start..content_start + end].trim());
-        }
-    }
-
-    if let Some(start) = text.find('{')
-        && let Some(end) = text.rfind('}')
-    {
-        return Some(&text[start..=end]);
-    }
-
-    None
 }

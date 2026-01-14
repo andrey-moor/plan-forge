@@ -10,13 +10,15 @@ pub mod slug;
 // Re-export main types
 pub use config::{CliConfig, HardChecklist, OutputConfig};
 pub use models::{Plan, ReviewResult};
-#[allow(deprecated)]
 pub use orchestrator::{
-    HumanResponse, LoopController, LoopResult, LoopState, OrchestrationState, OrchestrationStatus,
-    ResumeState, SessionRegistry,
+    HumanResponse, LoopResult, OrchestrationState, OrchestrationStatus, ResumeState,
+    SessionRegistry,
 };
 pub use output::{FileOutputWriter, OutputWriter};
-pub use phases::{GooseOrchestrator, GoosePlanner, GooseReviewer, Planner, Reviewer};
+pub use phases::{
+    GooseOrchestrator, GoosePlanner, GooseReviewer, Planner, PlanningContext, ReviewContext,
+    Reviewer,
+};
 
 // Re-export MCP server
 pub use mcp::{PlanForgeServer, SessionStatus};

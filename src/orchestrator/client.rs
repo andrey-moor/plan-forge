@@ -34,7 +34,7 @@ use super::guardrails::Guardrails;
 use super::orchestration_state::{
     HumanInputRecord, IterationOutcome, IterationRecord, OrchestrationState, OrchestrationStatus,
 };
-use super::viability::{ViabilityChecker, ViabilitySeverity};
+use super::viability::{analyze_dag, ViabilityChecker, ViabilitySeverity};
 use crate::models::Plan;
 use crate::phases::{GoosePlanner, GooseReviewer};
 
@@ -458,7 +458,7 @@ impl OrchestratorClient {
                     plan.grounding_snapshot.as_ref(),
                     Some(&plan.file_references),
                 );
-                let metrics = plan.instructions.as_ref().map(|i| checker.analyze_dag(i));
+                let metrics = plan.instructions.as_ref().map(|i| analyze_dag(i));
 
                 // Determine if validation passed (no Critical-severity violations)
                 let passed = result

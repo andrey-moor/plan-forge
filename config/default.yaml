@@ -7,11 +7,7 @@ review:
   recipe: recipes/reviewer.yaml
   provider_override: null
   model_override: null
-  pass_threshold: 0.8
-
-loop_config:
-  max_iterations: 5
-  early_exit_on_perfect_score: true
+  # NOTE: pass_threshold removed. Use guardrails.score_threshold instead.
 
 output:
   runs_dir: ./.plan-forge
@@ -27,49 +23,11 @@ guardrails:
   max_tool_calls: 100
   # Execution timeout in seconds (10 minutes)
   execution_timeout_secs: 600
-  # Soft limit for iterations (triggers human input request)
-  iteration_soft_limit: 7
-  # Score threshold below which human input is required
-  low_score_threshold: 0.5
-  # Keywords that trigger security-sensitive condition
-  security_keywords:
-    - credential
-    - auth
-    - encrypt
-    - secret
-    - token
-    - password
-    - api_key
-    - private_key
-    - certificate
-  # File patterns that trigger sensitive file condition
-  sensitive_file_patterns:
-    - "*.env"
-    - "*.env.*"
-    - "*secret*"
-    - "*credential*"
-    - "*.pem"
-    - "*.key"
-    - "**/secrets/**"
-  # Patterns indicating breaking API changes
-  breaking_api_patterns:
-    - "pub fn"
-    - "pub struct"
-    - "pub enum"
-    - "pub trait"
-  # Patterns indicating data deletion operations
-  data_deletion_patterns:
-    - "DROP TABLE"
-    - "DELETE FROM"
-    - "TRUNCATE"
-    - "rm -rf"
-    - "shutil.rmtree"
+  # Score threshold for pass/fail determination
+  score_threshold: 0.8
 
 # Orchestrator mode configuration
 orchestrator:
   recipe: recipes/orchestrator.yaml
   provider_override: null
   model_override: null
-
-# Use LLM-powered orchestrator instead of deterministic loop controller
-use_orchestrator: false

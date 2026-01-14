@@ -4,11 +4,9 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-#[allow(deprecated)]
 use plan_forge::{
-    generate_slug, slugify_truncate,
-    CliConfig, FileOutputWriter, GooseOrchestrator, GoosePlanner, GooseReviewer, HumanResponse,
-    LoopController, OrchestrationState, Plan, PlanForgeServer, ResumeState, SessionRegistry, slugify,
+    generate_slug, slugify_truncate, CliConfig, GooseOrchestrator, HumanResponse,
+    OrchestrationState, Plan, PlanForgeServer, ResumeState, SessionRegistry, slugify,
 };
 
 // Re-export MCP server types from goose-mcp
@@ -156,10 +154,6 @@ struct RunArgs {
     verbose: bool,
 
     // ============ Orchestrator Mode Flags ============
-
-    /// Use deprecated LoopController instead of LLM-powered orchestrator
-    #[arg(long)]
-    use_legacy_loop: bool,
 
     /// Override orchestrator model (e.g., "claude-sonnet-4-20250514")
     #[arg(long)]
@@ -348,7 +342,6 @@ fn resolve_input(args: &RunArgs) -> Result<(String, String, Option<ResumeState>)
     }
 }
 
-#[allow(deprecated)] // Legacy LoopController used in non-orchestrator path
 async fn handle_run_command(args: RunArgs) -> Result<()> {
     // Set up logging
     let filter = if args.verbose {
@@ -365,7 +358,7 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     info!("Plan-Review CLI starting");
 
     // Resolve task, slug, and resume state from --path and --task
-    let (task, resolved_slug, resume_state) = resolve_input(&args)?;
+    let (task, resolved_slug, _resume_state) = resolve_input(&args)?;
 
     // Use explicit --slug if provided, otherwise use resolved slug
     let task_slug = if let Some(explicit_slug) = &args.slug {
@@ -394,8 +387,8 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
     if let Some(provider) = args.reviewer_provider {
         config.review.provider_override = Some(provider);
     }
-    config.loop_config.max_iterations = args.max_iterations;
-    config.review.pass_threshold = args.threshold;
+    config.guardrails.max_iterations = args.max_iterations;
+    config.guardrails.score_threshold = args.threshold;
 
     // Set up output directories using task slug (for legacy mode)
     // Uses .plan-forge/<slug>/ in current working directory for project-local storage
@@ -416,139 +409,101 @@ async fn handle_run_command(args: RunArgs) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // Branch based on orchestrator mode (default) vs legacy loop controller
-    if !args.use_legacy_loop && config.use_orchestrator {
-        // ============ Orchestrator Mode (default) ============
-        info!("Using LLM-powered orchestrator mode");
-
-        // Apply orchestrator-specific config overrides FIRST (before slug generation)
-        if let Some(model) = args.orchestrator_model {
-            config.orchestrator.model_override = Some(model);
-        }
-        if let Some(provider) = args.orchestrator_provider {
-            config.orchestrator.provider_override = Some(provider);
-        }
-        if let Some(tokens) = args.max_total_tokens {
-            // -1 (or any negative) means unlimited
-            config.guardrails.max_total_tokens = if tokens < 0 {
-                u64::MAX
-            } else {
-                tokens as u64
-            };
-        }
-
-        // Use slug from resolve_input (handles resume correctly), or generate if needed
-        let is_resuming = args.path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
-        let task_slug = if is_resuming {
-            // When resuming, use the slug from the session directory (already resolved above)
-            info!("Using resumed session slug: {}", task_slug);
-            task_slug.clone()
-        } else if let Some(explicit_slug) = &args.slug {
-            info!("Using explicit slug: {}", explicit_slug);
-            slugify(explicit_slug)
-        } else if let Some((provider, model)) = config.slug_provider_model() {
-            let slug = generate_slug(&task, &provider, &model).await;
-            info!("LLM generated slug: {}", slug);
-            slug
+    // Apply orchestrator-specific config overrides
+    if let Some(model) = args.orchestrator_model {
+        config.orchestrator.model_override = Some(model);
+    }
+    if let Some(provider) = args.orchestrator_provider {
+        config.orchestrator.provider_override = Some(provider);
+    }
+    if let Some(tokens) = args.max_total_tokens {
+        // -1 (or any negative) means unlimited
+        config.guardrails.max_total_tokens = if tokens < 0 {
+            u64::MAX
         } else {
-            let slug = slugify_truncate(&task);
-            info!("Fallback slug: {}", slug);
-            slug
+            tokens as u64
         };
+    }
 
-        // Update runs_dir with the new slug
-        let runs_dir = args
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current dir"))
-            .join(".plan-forge")
-            .join(&task_slug);
-        std::fs::create_dir_all(&runs_dir)?;
-        config.output.slug = Some(task_slug.clone());
+    // Use slug from resolve_input (handles resume correctly), or generate if needed
+    let is_resuming = args.path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+    let task_slug = if is_resuming {
+        // When resuming, use the slug from the session directory (already resolved above)
+        info!("Using resumed session slug: {}", task_slug);
+        task_slug.clone()
+    } else if let Some(explicit_slug) = &args.slug {
+        info!("Using explicit slug: {}", explicit_slug);
+        slugify(explicit_slug)
+    } else if let Some((provider, model)) = config.slug_provider_model() {
+        let slug = generate_slug(&task, &provider, &model).await;
+        info!("LLM generated slug: {}", slug);
+        slug
+    } else {
+        let slug = slugify_truncate(&task);
+        info!("Fallback slug: {}", slug);
+        slug
+    };
 
-        // Build human response from --feedback flag, or --task when resuming from directory
-        // Natural language in feedback handles approve/revise/answer semantics
-        let is_dir_resume = args.path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
-        let human_response = args.feedback
-            .or_else(|| {
-                // When resuming from a directory, --task can serve as feedback
-                if is_dir_resume {
-                    args.task.clone()
-                } else {
-                    None
-                }
-            })
-            .map(|text| HumanResponse {
-                response: text,
-                approved: true, // Natural language in feedback handles intent
-            });
+    // Update runs_dir with the new slug
+    let runs_dir = args
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current dir"))
+        .join(".plan-forge")
+        .join(&task_slug);
+    std::fs::create_dir_all(&runs_dir)?;
+    config.output.slug = Some(task_slug.clone());
 
-        // Use explicit session_id if provided, otherwise derive from path
-        let session_id = args.session_id.clone().or_else(|| {
-            args.path.as_ref().and_then(|p| {
-                if p.is_dir() {
-                    p.file_name().and_then(|n| n.to_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
+    // Build human response from --feedback flag, or --task when resuming from directory
+    // Natural language in feedback handles approve/revise/answer semantics
+    let is_dir_resume = args.path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+    let human_response = args
+        .feedback
+        .or_else(|| {
+            // When resuming from a directory, --task can serve as feedback
+            if is_dir_resume {
+                args.task.clone()
+            } else {
+                None
+            }
+        })
+        .map(|text| HumanResponse {
+            response: text,
+            approved: true, // Natural language in feedback handles intent
         });
 
-        // Create session registry for concurrent session management
-        let session_registry = std::sync::Arc::new(SessionRegistry::new());
-
-        // Create orchestrator
-        let orchestrator = GooseOrchestrator::new(
-            config.orchestrator.clone(),
-            config.guardrails.clone(),
-            base_dir.clone(),
-            runs_dir.clone(),
-            session_registry,
-        );
-
-        // Run orchestrator
-        let working_dir_path = args.working_dir.clone();
-        let result = orchestrator
-            .run(task, working_dir_path, human_response, session_id)
-            .await?;
-
-        // Convert to LoopResult for consistent output
-        let loop_result: plan_forge::LoopResult = result.into();
-        print_result(loop_result)
-    } else {
-        // ============ Legacy Loop Controller Mode (DEPRECATED) ============
-        tracing::warn!(
-            "Using deprecated LoopController. Consider using orchestrator mode (default). \
-             The --use-legacy-loop flag will be removed in a future version."
-        );
-
-        // Create runs directory for legacy mode (orchestrator mode creates its own above)
-        std::fs::create_dir_all(&runs_dir)?;
-
-        // Create components
-        let planner = GoosePlanner::new(config.planning.clone(), base_dir.clone());
-        let reviewer = GooseReviewer::new(config.review.clone(), base_dir);
-        let output = FileOutputWriter::new(config.output.clone());
-
-        // Create loop controller
-        let mut controller =
-            LoopController::new(planner, reviewer, output, config).with_task_slug(task_slug.clone());
-
-        // Apply resume state if present
-        if let Some(resume) = resume_state {
-            if !resume.feedback.is_empty() {
-                info!("Resuming with user feedback");
+    // Use explicit session_id if provided, otherwise derive from path
+    let session_id = args.session_id.clone().or_else(|| {
+        args.path.as_ref().and_then(|p| {
+            if p.is_dir() {
+                p.file_name().and_then(|n| n.to_str()).map(String::from)
             } else {
-                info!("Resuming without feedback (re-running review)");
+                None
             }
-            controller = controller.with_resume(resume);
-        }
+        })
+    });
 
-        let working_dir = args.working_dir.map(|p| p.to_string_lossy().to_string());
-        let result = controller.run(task, working_dir).await?;
+    // Create session registry for concurrent session management
+    let session_registry = std::sync::Arc::new(SessionRegistry::new());
 
-        print_result(result)
-    }
+    // Create orchestrator
+    let orchestrator = GooseOrchestrator::new(
+        config.orchestrator.clone(),
+        config.guardrails.clone(),
+        base_dir.clone(),
+        runs_dir.clone(),
+        session_registry,
+    );
+
+    // Run orchestrator
+    let working_dir_path = args.working_dir.clone();
+    let result = orchestrator
+        .run(task, working_dir_path, human_response, session_id)
+        .await?;
+
+    // Convert to LoopResult for consistent output
+    let loop_result: plan_forge::LoopResult = result.into();
+    print_result(loop_result)
 }
 
 fn print_result(result: plan_forge::LoopResult) -> Result<()> {

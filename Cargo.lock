@@ -4644,6 +4644,7 @@ dependencies = [
  "goose-mcp",
  "jsonschema 0.29.1",
  "minijinja",
+ "once_cell",
  "regex",
  "rmcp",
  "schemars 1.2.0",

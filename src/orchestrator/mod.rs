@@ -1,15 +1,12 @@
 pub mod client;
 pub mod guardrails;
-pub mod loop_controller;
 pub mod orchestration_state;
 pub mod policy;
 pub mod state;
 pub mod viability;
 
-// Legacy exports (deprecated, use orchestrator mode)
-#[allow(deprecated)]
-pub use loop_controller::{HumanInputRequired, LoopController};
-pub use state::{LoopResult, LoopState, ResumeState};
+// State exports
+pub use state::{LoopResult, ResumeState};
 
 // New orchestrator exports
 pub use client::{

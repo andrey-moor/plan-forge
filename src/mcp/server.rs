@@ -18,14 +18,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-#[allow(deprecated)]
 use crate::{
-    CliConfig, FileOutputWriter, GooseOrchestrator, GoosePlanner, GooseReviewer, HumanResponse,
-    LoopController, OutputConfig, OutputWriter, Plan, ResumeState, SessionRegistry, generate_slug,
-    slugify,
+    CliConfig, FileOutputWriter, GooseOrchestrator, HumanResponse, OutputConfig, OutputWriter,
+    Plan, SessionRegistry, generate_slug, slugify,
 };
 
-use super::status::{SessionInfo, SessionStatus, derive_status, list_sessions};
+use super::status::{SessionInfo, derive_status, list_sessions};
 
 // ============================================================================
 // Session Metadata
@@ -89,12 +87,6 @@ pub struct PlanRunParams {
     pub task: String,
     /// Session ID to resume. If not provided, creates new session or uses current.
     pub session_id: Option<String>,
-    /// Reset turns counter when resuming (default: false)
-    #[serde(default)]
-    pub reset_turns: bool,
-    /// Use LLM-powered orchestrator instead of deterministic loop controller
-    #[serde(default)]
-    pub use_orchestrator: Option<bool>,
     /// Feedback for resuming paused sessions. Use natural language:
     /// - Answer questions: "Use JWT with 24h expiry"
     /// - Approve: "Looks good, proceed"
@@ -283,8 +275,8 @@ impl PlanForgeServer {
 
         let info = derive_status(
             &session_dir,
-            self.config.review.pass_threshold,
-            self.config.loop_config.max_iterations,
+            self.config.score_threshold(),
+            self.config.guardrails.max_iterations,
         )
         .map_err(|e| {
             ErrorData::new(
@@ -335,8 +327,8 @@ impl PlanForgeServer {
             let session_dir = self.session_dir(&session_id);
             if let Ok(info) = derive_status(
                 &session_dir,
-                self.config.review.pass_threshold,
-                self.config.loop_config.max_iterations,
+                self.config.score_threshold(),
+                self.config.guardrails.max_iterations,
             ) {
                 session_infos.push(info);
             }
@@ -432,90 +424,10 @@ impl PlanForgeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let task = params.0.task.clone();
         let session_id = params.0.session_id.clone();
-        let reset_turns = params.0.reset_turns;
-        let use_orchestrator = params.0.use_orchestrator.unwrap_or(self.config.use_orchestrator);
         let feedback = params.0.feedback;
 
-        // Check if orchestrator mode is enabled
-        if use_orchestrator {
-            return self
-                .run_orchestrator(task, session_id, feedback)
-                .await;
-        }
-
-        // Legacy loop controller mode
-        // Determine if this is a new session or resume
-        let (task_slug, resume_state, is_new_session) = if let Some(sid) = session_id {
-            // Resume existing session
-            let session_dir = self.session_dir(&sid);
-
-            if !session_dir.exists() {
-                return Err(ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("Session '{}' not found", sid),
-                    None,
-                ));
-            }
-
-            // Load latest plan for resume
-            let resume = self.load_resume_state(&session_dir, &task, reset_turns)?;
-            (sid, Some(resume), false)
-        } else {
-            // Check if we have a current session to resume
-            let current = self.current_session.read().ok().and_then(|c| c.clone());
-
-            if let Some(sid) = current {
-                let session_dir = self.session_dir(&sid);
-                let info = derive_status(
-                    &session_dir,
-                    self.config.review.pass_threshold,
-                    self.config.loop_config.max_iterations,
-                )
-                .ok();
-
-                // If current session is in a resumable state, resume it
-                if let Some(info) = info {
-                    match info.status {
-                        // Ready = just created, no plan files yet (retry while first call in progress)
-                        // Just reuse the session_id, don't try to load resume state
-                        SessionStatus::Ready => {
-                            self.set_current_session(sid.clone());
-                            return self.run_loop(sid, task, None, false).await;
-                        }
-                        // Has plan files, can resume with existing state
-                        SessionStatus::NeedsInput
-                        | SessionStatus::MaxTurns
-                        | SessionStatus::InProgress => {
-                            let resume =
-                                self.load_resume_state(&session_dir, &task, reset_turns)?;
-                            self.set_current_session(sid.clone());
-                            return self.run_loop(sid, task, Some(resume), false).await;
-                        }
-                        // Orchestrator states - must be resumed with orchestrator
-                        SessionStatus::BestEffort
-                        | SessionStatus::PausedForHumanInput { .. } => {
-                            // These are orchestrator sessions - route to run_orchestrator
-                            self.set_current_session(sid.clone());
-                            return self.run_orchestrator(task, Some(sid), feedback).await;
-                        }
-                        // Approved = completed, fall through to create new session
-                        SessionStatus::Approved => {}
-                        // HardStopped = cannot be resumed, fall through to create new session
-                        SessionStatus::HardStopped { .. } => {}
-                    }
-                }
-            }
-
-            // New session - generate slug using LLM
-            let (provider, model) = self.get_slug_provider_model();
-            let slug = generate_slug(&task, &provider, &model).await;
-            (slug, None, true)
-        };
-
-        // Set current session BEFORE run_loop to prevent duplicate directories on retries
-        self.set_current_session(task_slug.clone());
-        self.run_loop(task_slug, task, resume_state, is_new_session)
-            .await
+        // Always use the orchestrator mode
+        self.run_orchestrator(task, session_id, feedback).await
     }
 
     /// Force approve a session and write to dev/active/.
@@ -623,51 +535,6 @@ impl PlanForgeServer {
         })
     }
 
-    /// Load resume state from session directory
-    fn load_resume_state(
-        &self,
-        session_dir: &PathBuf,
-        feedback: &str,
-        reset_turns: bool,
-    ) -> Result<ResumeState, ErrorData> {
-        let plan = self.load_latest_plan(session_dir)?;
-
-        // Find highest iteration
-        let mut highest_iteration = 0u32;
-        if let Ok(entries) = std::fs::read_dir(session_dir) {
-            for entry in entries.flatten() {
-                let filename = entry.file_name();
-                let filename_str = filename.to_string_lossy();
-
-                if let Some(iter_str) = filename_str
-                    .strip_prefix("plan-iteration-")
-                    .and_then(|s| s.strip_suffix(".json"))
-                    && let Ok(iter) = iter_str.parse::<u32>()
-                {
-                    highest_iteration = highest_iteration.max(iter);
-                }
-            }
-        }
-
-        let start_iteration = if reset_turns {
-            1
-        } else {
-            highest_iteration + 1
-        };
-
-        let feedback_items = if feedback.is_empty() {
-            Vec::new()
-        } else {
-            vec![format!("[USER FEEDBACK] {}", feedback)]
-        };
-
-        Ok(ResumeState {
-            plan,
-            feedback: feedback_items,
-            start_iteration,
-        })
-    }
-
     /// Save session metadata to session directory
     fn save_session_meta(&self, session_dir: &Path, meta: &SessionMeta) -> Result<(), ErrorData> {
         let meta_path = session_dir.join("session-meta.json");
@@ -724,113 +591,7 @@ impl PlanForgeServer {
         (provider, model)
     }
 
-    /// Run the planning loop (legacy mode)
-    #[allow(deprecated)]
-    async fn run_loop(
-        &self,
-        task_slug: String,
-        task: String,
-        resume_state: Option<ResumeState>,
-        is_new_session: bool,
-    ) -> Result<CallToolResult, ErrorData> {
-        // Note: current_session is set by caller (plan_run) BEFORE calling run_loop
-        // to prevent duplicate directories when agent retries without session_id
-
-        // Create session directory
-        let session_dir = self.session_dir(&task_slug);
-        std::fs::create_dir_all(&session_dir).map_err(|e| {
-            ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to create session directory: {}", e),
-                None,
-            )
-        })?;
-
-        // Save session metadata for new sessions
-        if is_new_session {
-            let meta = SessionMeta::new(task_slug.clone(), task.clone());
-            self.save_session_meta(&session_dir, &meta)?;
-        }
-
-        // Set up config with session paths
-        let mut config = (*self.config).clone();
-        config.output.runs_dir = session_dir.clone();
-        config.output.active_dir = self.base_dir.join("dev/active");
-        // Set the slug so output files use the same directory name
-        config.output.slug = Some(task_slug.clone());
-
-        // Determine base directory for recipes
-        let base_dir = self.base_dir.clone();
-
-        // Create components
-        let planner = GoosePlanner::new(config.planning.clone(), base_dir.clone());
-        let reviewer = GooseReviewer::new(config.review.clone(), base_dir);
-        let output = FileOutputWriter::new(config.output.clone());
-
-        // Create loop controller
-        let mut controller = LoopController::new(planner, reviewer, output, config)
-            .with_task_slug(task_slug.clone());
-
-        // Apply resume state if present
-        if let Some(resume) = resume_state {
-            controller = controller.with_resume(resume);
-        }
-
-        // Run the loop
-        let result = controller.run(task, None).await;
-
-        match result {
-            Ok(result) => {
-                let response = serde_json::json!({
-                    "session_id": task_slug,
-                    "status": if result.success { "approved" } else { "max_turns" },
-                    "iterations": result.total_iterations,
-                    "score": result.final_review.llm_review.score,
-                    "title": result.final_plan.title,
-                    "summary": result.final_review.summary,
-                });
-
-                Ok(CallToolResult::success(vec![
-                    Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
-                        .with_audience(vec![Role::Assistant]),
-                ]))
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-
-                // Check if this is a human input required error
-                if error_msg.contains("Human input required") {
-                    let info = derive_status(
-                        &session_dir,
-                        self.config.review.pass_threshold,
-                        self.config.loop_config.max_iterations,
-                    )
-                    .ok();
-
-                    let response = serde_json::json!({
-                        "session_id": task_slug,
-                        "status": "needs_input",
-                        "reason": info.as_ref().and_then(|i| i.input_reason.clone()),
-                        "iteration": info.as_ref().map(|i| i.iteration),
-                        "score": info.as_ref().and_then(|i| i.latest_score),
-                    });
-
-                    return Ok(CallToolResult::success(vec![
-                        Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
-                            .with_audience(vec![Role::Assistant]),
-                    ]));
-                }
-
-                Err(ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Planning failed: {}", error_msg),
-                    None,
-                ))
-            }
-        }
-    }
-
-    /// Run the orchestrator for a task (LLM-powered mode).
+    /// Run the orchestrator for a task.
     async fn run_orchestrator(
         &self,
         task: String,
