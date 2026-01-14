@@ -8,13 +8,14 @@ use goose::providers::create_with_named_model;
 use tracing::{debug, warn};
 
 /// Maximum length for generated slugs (directory names)
-const MAX_SLUG_LENGTH: usize = 64;
+/// Target: 20 chars (IDE-friendly), hard limit: 30 chars
+const MAX_SLUG_LENGTH: usize = 30;
 
 /// Generate a short, meaningful slug using LLM.
 ///
-/// Uses the provided provider/model configuration to generate a 3-5 word slug
-/// that captures the essence of the task. Falls back to truncated slugify if
-/// LLM generation fails.
+/// Uses the provided provider/model configuration to generate a 1-3 word slug
+/// (max 20 chars target) that captures the essence of the task. Falls back to
+/// truncated slugify if LLM generation fails.
 ///
 /// # Arguments
 /// * `task` - The full task description
@@ -37,13 +38,27 @@ pub async fn generate_slug(task: &str, provider: &str, model: &str) -> String {
 async fn generate_slug_llm(task: &str, provider_name: &str, model_name: &str) -> Result<String> {
     let provider = create_with_named_model(provider_name, model_name).await?;
 
-    let system = r#"Generate a short slug (3-5 words, lowercase, hyphen-separated) that captures the essence of the given task description. The slug should be:
-- Concise but descriptive
-- Use lowercase letters and hyphens only
-- 3-5 words maximum
-- No articles (a, the) unless essential
+    let system = r#"Generate a very short slug for the task.
 
-Respond with ONLY the slug, nothing else. No quotes, no explanation."#;
+IMPORTANT: These slugs appear as directory names in IDE sidebars - brevity is critical.
+
+Rules:
+- 1-3 words maximum (2 words ideal)
+- Max 20 characters total
+- Lowercase, hyphen-separated
+- Capture the core noun/action only
+- Skip ALL modifiers: "comprehensive", "new", "better", "based on", etc.
+- Use common abbreviations: auth, config, api, db, impl, fix, refactor
+
+Examples:
+- "Add user authentication to the Express app" → "user-auth"
+- "Create comprehensive execution plan for orchestrator" → "orchestrator"
+- "Refactor database connection pool" → "db-pool"
+- "Fix bug in payment processing" → "payment-fix"
+- "Implement new caching layer for API" → "api-cache"
+- "Update logging configuration" → "log-config"
+
+Respond with ONLY the slug, no quotes."#;
 
     let messages = vec![Message::user().with_text(task)];
 

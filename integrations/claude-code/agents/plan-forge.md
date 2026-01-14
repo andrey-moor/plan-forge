@@ -20,7 +20,13 @@ When spawned, you will receive a task description. Your job is to:
 
 You have access to these plan-forge MCP tools:
 
-- `plan_run(task, session_id?, reset_turns?)` - Create or resume a planning session
+- `plan_run(task, session_id?, feedback?)` - Create or resume a planning session
+  - `task`: Task description (for new session) or feedback text (for resume)
+  - `session_id`: Session ID to resume (optional)
+  - `feedback`: Natural language feedback for resuming paused sessions (optional)
+    - Answer questions: "Use JWT with 24h expiry"
+    - Approve: "Looks good, proceed"
+    - Request changes: "Please revise to use PostgreSQL"
 - `plan_status(session_id?)` - Check session status
 - `plan_list(limit?)` - List all sessions
 - `plan_get(file, session_id?)` - Read plan content (file: "plan", "tasks", or "context")
@@ -63,7 +69,7 @@ Always return your result as JSON for easy parsing:
   "score": 0.92,
   "title": "Plan Title",
   "summary": "Plan passed review and is ready",
-  "next_action": "Review plan at dev/active/<slug>/"
+  "next_action": "Review plan at plans/active/<slug>/"
 }
 ```
 
@@ -79,9 +85,27 @@ Always return your result as JSON for easy parsing:
 }
 ```
 
+## Resuming Paused Sessions
+
+When a session is paused for human input, use `feedback` to resume:
+
+```
+plan_run(
+  task="",
+  session_id="my-session-slug",
+  feedback="Use JWT with 24h expiry for session tokens"
+)
+```
+
+The feedback string uses natural language - the orchestrator interprets intent:
+- Answer questions: "Use PostgreSQL for user data storage"
+- Approve and continue: "Looks good, please proceed"
+- Request changes: "Please revise to use file-based storage instead"
+
 ## Important Notes
 
 - You run asynchronously - the parent can continue while you work
 - Planning typically takes 1-5 iterations (30 seconds to several minutes)
 - If `needs_input`, clearly explain what information is needed
-- Plans are saved to `dev/active/<slug>/` when approved or paused
+- **Draft plans are visible**: When paused, plans are written to `plans/active/<slug>/` with "DRAFT - Awaiting Human Input" status
+- Final approved plans are written to `plans/active/<slug>/` with "Approved" status

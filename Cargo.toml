@@ -12,9 +12,9 @@ keywords = ["cli", "ai", "planning", "llm", "goose"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-# Core goose crates (using git instead of local path)
-goose = { git = "https://github.com/block/goose", tag = "v1.19.0" }
-goose-mcp = { git = "https://github.com/block/goose", tag = "v1.19.0" }
+# Core goose crates (using fork for Microsoft Foundry support)
+goose = { git = "https://github.com/andrey-moor/goose", branch = "feat/microsoft-foundry-provider" }
+goose-mcp = { git = "https://github.com/andrey-moor/goose", branch = "feat/microsoft-foundry-provider" }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
@@ -48,12 +48,18 @@ async-trait = "0.1"
 # JSON schema validation
 jsonschema = "0.29"
 
+# Regular expressions (for policy extraction)
+regex = "1"
+once_cell = "1.19"
+
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
 # MCP server (uses same version as goose-mcp)
 rmcp = { version = "0.12.0", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1.0"
+glob = "0.3.3"
+tokio-util = "0.7.18"
 
 [dev-dependencies]
 tempfile = "3.8"

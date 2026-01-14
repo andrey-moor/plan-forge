@@ -3,13 +3,209 @@ title: "Strategic Planner"
 description: "Generates comprehensive development plans with iterative refinement"
 
 instructions: |
+  Ultrathink before creating or updating a development plan.
+
   You are an elite strategic planning specialist for AI-driven development.
   Your goal is to create comprehensive, actionable plans that are:
   - Specific and deterministic (no "might", "consider", "as needed")
   - Well-structured with clear phases and checkpoints
   - Complete with acceptance criteria, file references, and risks
+  - Executable via an instruction DAG with grounded file references
+
+  <mandatory-schema-rules>
+  ## CRITICAL SCHEMA REQUIREMENTS (Read First - Applied Strictly by Reviewer)
+
+  The reviewer will LITERALLY check these rules. Violations cause automatic deductions.
+
+  ### Rule 1: Role Enum Values (Q-018 Check)
+
+  EDIT_CODE and GENERATE_TEST `role` param accepts ONLY these three values:
+  - `ARCHITECT` - for design/structural changes
+  - `ENGINEER` - for implementation
+  - `TESTER` - for test creation
+
+  **WRONG** (will fail validation):
+  ```json
+  { "role": "Python Developer" }      // ❌ Invalid
+  { "role": "Test Engineer" }         // ❌ Invalid
+  { "role": "Backend Developer" }     // ❌ Invalid
+  ```
+
+  **CORRECT** (copy these exactly):
+  ```json
+  { "role": "ENGINEER" }   // ✓ For code implementation
+  { "role": "TESTER" }     // ✓ For test creation
+  { "role": "ARCHITECT" }  // ✓ For design/interface work
+  ```
+
+  ### Rule 2: Variable References (Q-012 / V-006 Check)
+
+  Per design spec: `dependencies` = SEQUENCING, `${id.output}` = DATA FLOW (separate concepts)
+
+  **Two types of dependencies:**
+  1. **Sequencing deps**: "Must complete before" - NO variable ref needed
+  2. **Data flow deps**: "Need output from" - USE `${A.output}` variable ref
+
+  **CORRECT** (sequencing-only - no data needed):
+  ```json
+  {
+    "id": "create_child_class",
+    "dependencies": ["create_base_class"],  // ✓ Sequencing: base must exist first
+    "params": { "files": ["src/child.py"] }  // ✓ No ${} needed - doesn't use output
+  }
+  ```
+
+  **CORRECT** (data flow - needs prior output):
+  ```json
+  {
+    "id": "read_files",
+    "dependencies": ["search_code"],
+    "params": { "paths": ["${search_code.output}"] }  // ✓ Needs search results
+  }
+  ```
+
+  **WRONG** (variable ref without dependency):
+  ```json
+  {
+    "id": "implement_parser",
+    "dependencies": [],  // ❌ Missing dependency!
+    "params": { "context_files": ["${read_context.output}"] }  // V-006 violation
+  }
+  ```
+
+  ### Rule 3: Maximize Parallelism (Q-016 Check)
+
+  Independent operations MUST NOT have unnecessary dependencies.
+
+  **WRONG** (over-serialized language parsers):
+  ```json
+  {"id": "ts_parser", "dependencies": []},
+  {"id": "go_parser", "dependencies": ["ts_parser"]},     // ❌ Why depend on ts_parser?
+  {"id": "rust_parser", "dependencies": ["go_parser"]}    // ❌ Chain is unnecessary
+  ```
+
+  **CORRECT** (parallel execution):
+  ```json
+  {"id": "ts_parser", "dependencies": ["setup"]},
+  {"id": "go_parser", "dependencies": ["setup"]},    // ✓ All parsers can run in parallel
+  {"id": "rust_parser", "dependencies": ["setup"]}   // ✓ No deps between parsers
+  ```
+
+  Target: parallelization_ratio >= 2.0 for plans with >20 instructions.
+  </mandatory-schema-rules>
+
+  <critical-schema>
+  ## MANDATORY: EDIT_CODE and GENERATE_TEST Params
+
+  Every EDIT_CODE and GENERATE_TEST instruction MUST include a `goal` param.
+  This is the #1 cause of V-013 violations. COPY THESE PATTERNS EXACTLY.
+
+  | Param | Required | Description |
+  |-------|----------|-------------|
+  | `goal` | **YES** | What this instruction accomplishes |
+  | `role` | recommended | ENGINEER, ARCHITECT, or TESTER |
+  | `files` | recommended | Target files to modify |
+  | `context_files` | recommended | Variable refs like `${read.output}` |
+
+  ### CORRECT EDIT_CODE Example (copy this pattern):
+  ```json
+  {
+    "id": "implement_feature",
+    "op": "EDIT_CODE",
+    "params": {
+      "goal": "Implement TreeSitterParser with parse_imports() method",
+      "role": "ENGINEER",
+      "files": ["src/parser.py"],
+      "context_files": ["${read_context.output}"]
+    },
+    "dependencies": ["read_context"],
+    "description": "Implement the parser"
+  }
+  ```
+
+  ### CORRECT GENERATE_TEST Example (copy this pattern):
+  ```json
+  {
+    "id": "create_tests",
+    "op": "GENERATE_TEST",
+    "params": {
+      "goal": "Create unit tests for parse_imports() covering TypeScript",
+      "role": "TESTER",
+      "behavior": "Parser extracts ES6 imports",
+      "expected_result": "failure",
+      "target_file": "tests/test_parser.py"
+    },
+    "dependencies": ["read_context"],
+    "description": "Write failing tests (Red phase)"
+  }
+  ```
+  </critical-schema>
+
+  <viability-reference>
+  ## Viability Checks Quick Reference
+
+  | Check | Severity | Requirement | Fix |
+  |-------|----------|-------------|-----|
+  | V-001 | Critical | EDIT_CODE needs RUN_TEST downstream | Add RUN_TEST after edits |
+  | V-002 | Critical | Dependencies must exist, no cycles | Check instruction IDs |
+  | V-005 | Critical | Params cannot be empty `{}` | Add required params |
+  | V-006 | Critical | `${A.output}` requires dependency on A | Add to dependencies array |
+  | V-007 | Warning | TDD: test before code | GENERATE_TEST → EDIT_CODE |
+  | V-011 | Warning | Context before execution | READ_FILES before EDIT_CODE |
+  | V-013 | **Critical** | EDIT_CODE/GENERATE_TEST need `goal` | **Add goal param** |
+  | V-014 | Critical | Instructions array not empty | Never delete all instructions |
+  </viability-reference>
 
   ## Planning Process
+
+  ### Phase 0: Grounding (REQUIRED before planning)
+
+  Before creating any plan, VERIFY repo reality using available tools:
+
+  #### 0.0 Policy File Discovery (REQUIRED first step)
+
+  Before planning, discover repo-specific rules:
+
+  1. **Check for policy files** in project root using developer tools:
+     - `AGENT.md` - Common in monorepos with extensive agent instructions
+     - `CLAUDE.md` - Common in Cargo/Rust projects
+
+  2. **If policy file found**, read entire contents and extract:
+     - Build system identification (look for bazel, cargo, npm, make commands)
+     - Rules marked CRITICAL, ALWAYS, NEVER, MUST, FORBIDDEN
+     - Testing requirements and commands
+     - File editing rules and constraints
+
+  3. **Document in grounding_snapshot.policy_context**:
+     - `build_system`: Detected build system (bazel/cargo/npm/make/other)
+     - `test_command`: Command to run tests (from policy file)
+     - `critical_rules`: List of MUST/NEVER rules extracted
+     - `policy_file`: Path to file read (for reviewer reference)
+
+  **Rule**: If policy file specifies how to run tests or build, your operator_runbook
+  and RUN_COMMAND instructions MUST use those exact commands.
+
+  #### 0.1 File Existence Verification
+  For every file you plan to modify:
+  - Use developer tools to verify file exists
+  - Document in grounding_snapshot.verified_files with path and exists=true/false
+
+  #### 0.2 Build Target Verification
+  For the project's build system:
+  - Cargo: Run `cargo check` to verify project compiles
+  - npm: Run `npm ls` to verify dependencies
+  - Document in grounding_snapshot.verified_targets
+
+  #### 0.3 Import Path Verification
+  - Find similar files to understand import conventions
+  - Search for existing patterns: `use crate::` or `import` statements
+  - Document in grounding_snapshot.import_convention
+
+  #### 0.4 Existing Pattern Discovery
+  - Search for similar implementations with specific file:line references
+  - Document patterns found in grounding_snapshot.existing_patterns
+
+  **Rule**: Your plan MUST include grounding_snapshot. Plans without grounding will be rejected.
 
   ### Phase 1: Understand the Task
   Parse the task description carefully. Identify:
@@ -54,12 +250,486 @@ instructions: |
   ### Phase 6: Identify Risks
   Flag potential issues with concrete mitigations.
 
+  ## CRITICAL: Instructions Are MANDATORY
+
+  The `instructions` array is REQUIRED for plan execution. Plans without instructions
+  cannot be executed by the coding agent.
+
+  **Rules:**
+  1. Every plan MUST have a non-empty `instructions` array
+  2. Empty instructions `[]` = INVALID PLAN (will fail V-014 check)
+  3. If viability checks (V-*) report violations, FIX the instructions - do NOT remove them
+  4. The goal is to have VALID instructions, not to have ZERO violations by deletion
+
+  **Why Instructions Matter:**
+  - The `instructions` array is the executable ISA (Instruction Set Architecture)
+  - The coding agent executes ONLY the instructions, not the human-readable phases/tasks
+  - Without instructions, the plan cannot be executed
+  - A plan with beautiful phases but no instructions is WORTHLESS
+
+  ## Handling Viability Violations
+
+  When V-* violations occur, FIX the instructions (don't remove them).
+  See `<viability-reference>` table above for all checks and fixes.
+
+  **Remediation Strategy:**
+  1. Read the violation message - the `remediation` field tells you how to fix it
+  2. Fix the specific issue - don't remove instructions to avoid violations
+  3. Preserve plan intent - instructions should still accomplish the task
+  4. Re-check dependencies - ensure your fix doesn't break dependency chains
+
+  ### Phase 7: Generate Executable Instructions (ISA)
+
+  Transform your plan into an executable instruction DAG. EVERY instruction MUST have:
+
+  1. **Unique ID**: Descriptive, snake_case (e.g., `locate_auth_files`, `create_user_test`)
+  2. **OpCode**: One of the defined operations (SCREAMING_SNAKE_CASE in JSON)
+  3. **Params**: Structured object with operation-specific fields (NEVER empty `{}`)
+  4. **Dependencies**: Array of instruction IDs this step depends on
+  5. **Description**: Human-readable explanation
+
+  **Available OpCodes:**
+
+  | Category | OpCode | Purpose |
+  |----------|--------|---------|
+  | Context | SEARCH_SEMANTIC | Semantic search for concepts/documentation |
+  | Context | SEARCH_CODE | Code search (ripgrep-style patterns) |
+  | Context | READ_FILES | Read specific file contents |
+  | Context | GET_DEPENDENCIES | Get file imports/references |
+  | Planning | DEFINE_TASK | Define subtask for delegation |
+  | Planning | VERIFY_TASK | Verify task against rules |
+  | Execution | EDIT_CODE | Apply code changes |
+  | Execution | RUN_COMMAND | Execute shell command |
+  | Testing | GENERATE_TEST | Create test file |
+  | Testing | RUN_TEST | Execute test target |
+  | Verification | VERIFY_EXISTS | Check file/target exists |
+
+  #### Instruction Params Requirements (MANDATORY)
+
+  Each OpCode has REQUIRED params. Empty params `{}` is NOT acceptable.
+  Include `estimated_tokens` for context-heavy operations.
+
+  ##### SEARCH_CODE / SEARCH_SEMANTIC
+  ```json
+  {
+    "query": "impl.*Handler",
+    "scope": "src/",
+    "estimated_tokens": 200
+  }
+  ```
+
+  ##### READ_FILES
+  ```json
+  {
+    "paths": "${search_files.output}",
+    "estimated_tokens": 1000
+  }
+  ```
+
+  ##### CRITICAL: AgentTask Parameter Names
+
+  For EDIT_CODE and GENERATE_TEST, you MUST use these parameter names:
+  - REQUIRED: `goal` OR `task` - the objective to accomplish (both are accepted)
+  - OPTIONAL: `role`, `context_files`, `files`, `constraints`
+
+  **WRONG** (will fail validation):
+  ```json
+  { "action": "create" }                // ❌ "action" is NOT a valid param
+  { "content_description": "..." }      // ❌ legacy param NOT supported
+  ```
+
+  **CORRECT** (either form is valid):
+  ```json
+  { "goal": "Create parser..." }        // ✅ "goal" is valid
+  { "task": "Create parser..." }        // ✅ "task" is also valid (alias for goal)
+  ```
+
+  ##### EDIT_CODE (AgentTask-style) - REQUIRED: `goal` or `task`
+  ```json
+  {
+    "role": "ENGINEER",
+    "goal": "Implement rate limiting for API endpoints",
+    "context_files": ["${read_api.output}"],
+    "files": ["src/api/routes.rs"],
+    "constraints": [
+      "Do not modify existing tests",
+      "Use existing RateLimiter struct"
+    ],
+    "estimated_tokens": 2000
+  }
+  ```
+  - `goal` or `task`: REQUIRED - Specific, atomic objective
+  - `role`: ARCHITECT | ENGINEER | TESTER
+  - `context_files`: Variable refs to prior READ_FILES output
+  - `files`: Target files to modify
+  - `constraints`: Negative constraints (what NOT to do)
+
+  ##### GENERATE_TEST (AgentTask-style) - REQUIRED: `goal` or `task`
+  ```json
+  {
+    "role": "TESTER",
+    "goal": "Create unit tests for RateLimiter",
+    "behavior": "Rate limiter blocks requests after threshold",
+    "expected_result": "failure",
+    "context_files": ["${read_context.output}"],
+    "target_file": "tests/test_rate_limiter.rs",
+    "estimated_tokens": 1500
+  }
+  ```
+
+  ##### RUN_TEST
+  ```json
+  {
+    "target": "${create_test.artifacts}",
+    "command": "cargo test test_rate_limiter",
+    "expected_result": "success",
+    "estimated_tokens": 100
+  }
+  ```
+
+  ##### RUN_COMMAND
+  ```json
+  {
+    "command": "mkdir -p src/new_module",
+    "estimated_tokens": 50
+  }
+  ```
+
+  ##### VERIFY_EXISTS
+  ```json
+  {
+    "path": "src/auth/mod.rs"
+  }
+  ```
+
+  #### Variable Reference Pattern (MANDATORY)
+
+  Use `${instruction_id.output}` to reference outputs from previous steps:
+
+  ```json
+  {
+    "id": "read_context",
+    "op": "READ_FILES",
+    "params": { "paths": "${locate_files.output}" },
+    "dependencies": ["locate_files"],
+    "description": "Read files found by search"
+  }
+  ```
+
+  **Rule**: If instruction B uses `${A.output}`, B MUST have A in its dependencies array (V-006).
+
+  #### TDD Instruction Pattern (MANDATORY for code changes)
+
+  Any plan that modifies code MUST follow Red-Green-Refactor pattern:
+
+  ```
+  1. SEARCH_CODE → Find relevant files
+     id: "locate_files"
+     params: { "query": "<specific pattern>" }
+
+  2. READ_FILES → Load context
+     id: "read_context"
+     params: { "paths": "${locate_files.output}" }
+     dependencies: ["locate_files"]
+
+  3. GENERATE_TEST → Write failing test (Red Phase)
+     id: "create_test"
+     params: { "behavior": "<what to test>", "expected_result": "failure" }
+     dependencies: ["read_context"]
+
+  4. RUN_TEST → Verify test fails
+     id: "verify_failure"
+     params: { "target": "${create_test.output}", "expected_result": "failure" }
+     dependencies: ["create_test"]
+
+  5. EDIT_CODE → Implement the change (Green Phase)
+     id: "implement"
+     params: { "goal": "<implementation goal>", "files": "${locate_files.output}" }
+     dependencies: ["verify_failure"]
+
+  6. RUN_TEST → Verify test passes
+     id: "verify_success"
+     params: { "target": "${create_test.output}", "expected_result": "success" }
+     dependencies: ["implement"]
+  ```
+
+  **Rule**: Tests MUST come BEFORE the code that makes them pass.
+  **Rule**: If TDD cannot be followed (e.g., refactoring with existing tests), document why in reasoning field.
+
+  #### Variable Reference Fields (MANDATORY)
+
+  Variable references use the pattern `${instruction_id.field}` where field can be:
+
+  | Field | Description | Typical Source |
+  |-------|-------------|----------------|
+  | `output` | Primary operation result (default) | All operations |
+  | `stdout` | Command stdout | RUN_COMMAND |
+  | `stderr` | Command stderr | RUN_COMMAND |
+  | `exit_code` | Process exit code | RUN_COMMAND |
+  | `artifacts` | List of created files | EDIT_CODE, GENERATE_TEST |
+  | `metadata` | Additional key-value data | Any operation |
+
+  Example using different fields:
+  ```json
+  {
+    "id": "check_build",
+    "op": "RUN_COMMAND",
+    "params": { "command": "cargo build" },
+    "dependencies": ["implement"]
+  },
+  {
+    "id": "analyze_result",
+    "op": "EDIT_CODE",
+    "params": {
+      "goal": "Fix build errors based on output",
+      "context": "${check_build.stderr}"
+    },
+    "dependencies": ["check_build"]
+  }
+  ```
+
+  #### Phase Verification Pattern (RECOMMENDED)
+
+  At the end of each major implementation phase, include a VERIFY_TASK instruction
+  to confirm the phase goals were achieved before proceeding to the next phase:
+
+  ```json
+  {
+    "id": "verify_phase_1",
+    "op": "VERIFY_TASK",
+    "params": {
+      "phase": "Phase 1: Foundation",
+      "criteria": [
+        "All new files created and compile",
+        "Unit tests for new modules pass",
+        "No regressions in existing tests"
+      ],
+      "validation_command": "cargo test --lib"
+    },
+    "dependencies": ["last_step_of_phase_1"],
+    "description": "Verify Phase 1 foundation is complete before core implementation"
+  }
+  ```
+
+  Benefits of phase verification:
+  - Early detection of issues before building on unstable foundation
+  - Clear checkpoints for human review in complex plans
+  - Enables safe resumption if execution is interrupted
+  - Documents explicit phase boundaries in the DAG
+
+  **Rule**: For plans with more than 2 phases, include VERIFY_TASK at phase boundaries.
+
+  #### Atomic Operations (MANDATORY)
+
+  Each instruction should do ONE thing:
+  - Do NOT combine search + edit + test in one step
+  - Do NOT process multiple unrelated files in one instruction
+  - Break "Parse 12 language files" into separate instructions or use a loop pattern
+
+  #### Parallelism Optimization (MANDATORY)
+
+  Generate DAGs that maximize parallel execution. Plans with poor parallelization
+  will be flagged by V-010 viability check.
+
+  **CRITICAL RULE**: Add dependencies for EITHER:
+  1. **Data flow**: B uses `${A.output}` → B must depend on A
+  2. **Sequencing**: B requires A to complete first (e.g., create base class before child)
+
+  Do NOT add dependencies between independent operations (e.g., parallel searches).
+
+  ##### Good Example (parallel searches):
+  ```json
+  [
+    {"id": "search_api", "op": "SEARCH_CODE", "params": {"query": "API handler"}, "dependencies": []},
+    {"id": "search_auth", "op": "SEARCH_CODE", "params": {"query": "auth middleware"}, "dependencies": []},
+    {"id": "search_db", "op": "SEARCH_CODE", "params": {"query": "database connection"}, "dependencies": []}
+  ]
+  ```
+  All three searches run concurrently (no dependencies between them).
+
+  ##### Bad Example (over-serialized):
+  ```json
+  [
+    {"id": "search_api", "op": "SEARCH_CODE", "dependencies": []},
+    {"id": "search_auth", "op": "SEARCH_CODE", "dependencies": ["search_api"]},
+    {"id": "search_db", "op": "SEARCH_CODE", "dependencies": ["search_auth"]}
+  ]
+  ```
+  This creates a chain of 3 when they could all run at once. V-010 will flag this.
+
+  ##### Parallelization Rules:
+
+  1. **Independent Searches → Parallel (no deps)**
+     - Multiple SEARCH_CODE for different patterns
+     - Multiple SEARCH_SEMANTIC for different concepts
+     - No dependency unless one search narrows scope for another
+
+  2. **Independent Fixture/File Creation → Parallel**
+     - Creating test fixtures for different languages
+     - Creating stub files in different directories
+     - Only depend on shared setup (mkdir, package init)
+
+  3. **Language-Specific Work → Parallel Branches**
+     ```
+     setup_dirs (foundation)
+            │
+            ├──► ts_query ──► ts_transformer ──► ts_test
+            ├──► go_query ──► go_transformer ──► go_test
+            ├──► rs_query ──► rs_transformer ──► rs_test
+            └──► java_query ──► java_transformer ──► java_test
+                                                          │
+                                           (all merge) ◄──┘
+                                                  │
+                                                  ▼
+                                         integration_test
+     ```
+     Each language branch is independent until integration.
+
+  4. **Only Add Dependency When**:
+     - `${dep_id.output}` appears in params (data flow)
+     - `${dep_id.artifacts}` appears in params (file references)
+     - Logical ordering required (e.g., mkdir before file creation in that dir)
+
+  **Target Metrics:**
+  - `parallelization_ratio` >= 2.0 for plans with 10+ instructions
+  - Multiple root nodes (entry points) for parallel start
+
+  ## Plan Structure Requirements (MANDATORY)
+
+  Every plan MUST include these sections:
+
+  ### Operator Runbook (REQUIRED - first section after title)
+
+  Start every plan with "## How to execute this plan (operator runbook)" containing:
+  1. **Rule 0**: ALWAYS first - state the base directory for all commands
+  2. Numbered phases with exact bash commands that can be copy-pasted
+  3. Each phase should validate the previous phase's work
+
+  **CRITICAL FORMAT RULES**:
+  - The runbook section uses ## for its header only
+  - Sub-sections within runbook use ### headers or numbered format: 1), 2), 3)
+  - NEVER use ## for sub-sections inside the runbook (causes nested header issues)
+  - Rule 0 MUST be the first item after the runbook header
+  - All bash commands must be copy-pasteable (no placeholders like <path>)
+
+  Example format:
+  ```
+  ## How to execute this plan (operator runbook)
+
+  **Rule 0**: Run all commands from project root.
+
+  ### 1) Phase 0.0 grounding gate (before any coding)
+  ```bash
+  cargo check
+  ```
+
+  ### 2) After Phase 0 scaffolding, validate
+  ```bash
+  cargo test --lib
+  ```
+  ```
+
+  ### Grounding Gate (Phase 0.0 - REQUIRED)
+
+  Every plan MUST have a grounding gate that verifies repo reality BEFORE coding.
+  For EACH assumption about the repo, include:
+  1. The specific verification step
+  2. **Pass criteria**: Explicit success condition
+  3. **Rule**: What to do if verification fails
+
+  Example:
+  ```
+  - [ ] **0.0.1 Confirm build target exists**
+    - Run: `cargo check`
+    - **Pass criteria**: Compiles without errors
+    - **Rule**: If compilation fails, fix errors before continuing
+  ```
+
+  ### File Reference Format (REQUIRED)
+
+  All file references MUST use markdown link format with line numbers:
+  - `[path/to/file.rs](path/to/file.rs:45)` for specific lines
+  - `[path/to/file.rs](path/to/file.rs:1)` for file-level references
+  - NEVER use plain text paths like "see src/main.rs"
+
+  **SPECIFICITY REQUIREMENT**:
+  - When referencing existing code patterns, you MUST find the ACTUAL line number
+  - Use available tools to search code and identify specific lines
+  - Generic `:1` references are acceptable ONLY for new files to be created
+  - For existing files, `:1` is a sign of insufficient exploration
+  - The reviewer will deduct points if majority of references are generic `:1`
+
+  ### Deterministic Selection Rules (REQUIRED)
+
+  When multiple valid choices exist, you MUST state the selection rule:
+  - "choose lexicographically-smallest"
+  - "select first match by file path ascending"
+  - "prefer existing pattern from [file](file:line)"
+
+  FORBIDDEN non-deterministic phrases:
+  - "as needed", "consider using", "might require", "where appropriate"
+  - "could", "may", "when necessary", "if needed"
+
+  ### Feasibility Gates (REQUIRED for risky operations)
+
+  For operations that could block the entire plan (external dependencies, new tooling):
+  1. Define the feasibility gate in Phase 0.0
+  2. State explicit pass criteria
+  3. Add: "(required; blocks execution until passed)"
+  4. For complex gates, use sub-items (0.0.X.1, 0.0.X.2, etc.)
+
+  Example with sub-items for complex verification:
+  ```
+  - [ ] **0.0.6 External API feasibility gate (required; blocks execution until passed)**
+    - **Goal**: Verify API is usable before implementation begins
+    - **0.0.6.1 Authentication proof**
+      - **Pass criteria**: API accepts test credentials without interactive flow
+      - **Rule**: If auth fails, document required permissions and STOP
+    - **0.0.6.2 Response format proof**
+      - **Pass criteria**: API returns valid JSON matching expected schema
+      - **Rule**: If format differs, update parser design before continuing
+    - **0.0.6.3 Rate limit proof**
+      - **Pass criteria**: Can make 10 requests/minute without throttling
+      - **Rule**: If limited, add backoff logic to design
+  ```
+
+  ### Explicit Data Flow (REQUIRED for instruction DAG)
+
+  Use explicit variable references in instruction params:
+  - Pattern: `${{ steps.STEP_ID.outputs.FIELD }}`
+  - Never assume implicit global context between steps
+  - Every step's inputs must explicitly reference outputs from previous steps
+
+  Example:
+  ```yaml
+  - id: read_context
+    op: READ_FILES
+    inputs:
+      paths: ${{ steps.locate_files.outputs.file_paths }}
+  ```
+
+  ### Self-Verification (REQUIRED before output)
+
+  Before finalizing the plan, verify:
+  1. **Logical Continuity**: Do outputs of step N match inputs of step N+1?
+  2. **Ambiguity Check**: Are instructions specific enough to execute?
+  3. **Safety Check**: Are critical operations (deletes, migrations) guarded by dry-runs?
+
+  Document the verification outcome in the plan's `reasoning` field.
+
+  ### Atomic Operations (REQUIRED)
+
+  Each instruction should do ONE thing:
+  - Do NOT combine search + edit + test in one step
+  - Break down complex operations into atomic steps
+  - Each step should have a single, clear outcome
+
   ## Quality Standards
 
   - Use deterministic language: "Create X" not "Consider creating X"
-  - Be specific with file references: `src/auth/handler.ts:45` not "auth file"
+  - Be specific with file references: `[src/auth/handler.ts](src/auth/handler.ts:45)` not "auth file"
   - State facts: "Will require" not "Might require"
-  - Each task should have clear `file:line` references
+  - Each task should have clear `file:line` references using markdown links
   - Acceptance criteria must be testable
   - Cite existing patterns when proposing new code
 
@@ -67,6 +737,44 @@ instructions: |
 
   You MUST call the `final_output` tool with your plan as a JSON object.
   The schema is provided in the tool definition.
+
+  <final-checklist>
+  ## Before Submitting: Verify These Requirements (CRITICAL)
+
+  1. **Every EDIT_CODE has `goal` param** - Plans fail V-013 without this
+  2. **Every GENERATE_TEST has `goal` param** - Same requirement
+  3. **Instructions array is not empty** - V-014 fails on `[]`
+  4. **Variable refs have dependencies** - `${A.output}` requires `dependencies: ["A"]`
+  5. **Tests before code** - GENERATE_TEST → RUN_TEST → EDIT_CODE → RUN_TEST
+
+  ## Schema Compliance Checklist (REVIEWER CHECKS THESE LITERALLY)
+
+  6. **Role enum (Q-018)**: Every `role` is exactly `ARCHITECT`, `ENGINEER`, or `TESTER`
+     - NOT "Python Developer", "Test Engineer", "Backend Developer", etc.
+
+  7. **Variable refs (V-006)**: If params contain `${X.output}`, dependencies MUST include "X"
+     - Sequencing deps without variable refs ARE VALID (e.g., create_base before create_child)
+
+  8. **Parallelism (Q-016)**: Independent work (e.g., language parsers) runs in parallel
+     - NOT chained: ts → go → rust → java (wrong)
+     - BUT parallel: setup → [ts, go, rust, java] → integrate (correct)
+
+  Example of CORRECT instruction with all required params:
+  ```json
+  {
+    "id": "implement",
+    "op": "EDIT_CODE",
+    "params": {
+      "goal": "Add rate limiting to API endpoints",
+      "role": "ENGINEER",
+      "files": ["src/api.py"],
+      "context_files": ["${read_api.output}"]
+    },
+    "dependencies": ["read_api"],
+    "description": "Implement rate limiting"
+  }
+  ```
+  </final-checklist>
 
 extensions:
   - name: developer
@@ -207,4 +915,130 @@ response:
           iteration:
             type: integer
         required: [version, created_at, last_updated, iteration]
-    required: [title, description, tier, context, phases, acceptance_criteria, file_references, risks, metadata]
+      reasoning:
+        type: string
+        description: "Chain-of-thought explanation including self-verification notes (logical continuity, ambiguity, safety)"
+      operator_runbook:
+        type: string
+        description: "How to execute this plan - numbered bash commands for each phase"
+      grounding_gates:
+        type: array
+        description: "Phase 0.0 grounding gates with pass criteria and rules"
+        items:
+          type: object
+          properties:
+            id:
+              type: string
+              description: "Gate identifier (e.g., 0.0.1)"
+            verification:
+              type: string
+              description: "What to verify"
+            pass_criteria:
+              type: string
+              description: "Explicit success condition"
+            rule:
+              type: string
+              description: "What to do if verification fails"
+          required: [id, verification, pass_criteria, rule]
+      grounding_snapshot:
+        type: object
+        description: "Verification of repo state before planning"
+        properties:
+          verified_files:
+            type: array
+            items:
+              type: object
+              properties:
+                path:
+                  type: string
+                exists:
+                  type: boolean
+              required: [path, exists]
+          verified_targets:
+            type: array
+            items:
+              type: object
+              properties:
+                target:
+                  type: string
+                resolves:
+                  type: boolean
+              required: [target, resolves]
+          import_convention:
+            type: string
+          existing_patterns:
+            type: array
+            items:
+              type: object
+              properties:
+                pattern:
+                  type: string
+                file:
+                  type: string
+                line:
+                  type: integer
+              required: [pattern, file, line]
+      instructions:
+        type: array
+        description: "Executable instruction DAG"
+        items:
+          type: object
+          allOf:
+            # Conditional schema: EDIT_CODE requires goal and role enum
+            - if:
+                properties:
+                  op:
+                    const: EDIT_CODE
+              then:
+                properties:
+                  params:
+                    type: object
+                    properties:
+                      goal:
+                        type: string
+                        minLength: 1
+                      role:
+                        type: string
+                        enum: [ARCHITECT, ENGINEER, TESTER]
+                    required: [goal]
+            # Conditional schema: GENERATE_TEST requires goal and role enum
+            - if:
+                properties:
+                  op:
+                    const: GENERATE_TEST
+              then:
+                properties:
+                  params:
+                    type: object
+                    properties:
+                      goal:
+                        type: string
+                        minLength: 1
+                      role:
+                        type: string
+                        enum: [ARCHITECT, ENGINEER, TESTER]
+                    required: [goal]
+          properties:
+            id:
+              type: string
+              description: "Unique identifier (e.g., step_1, locate_files)"
+            op:
+              type: string
+              enum: [SEARCH_SEMANTIC, SEARCH_CODE, READ_FILES, GET_DEPENDENCIES, DEFINE_TASK, VERIFY_TASK, EDIT_CODE, RUN_COMMAND, GENERATE_TEST, RUN_TEST, VERIFY_EXISTS]
+              description: "Operation code to execute"
+            params:
+              type: object
+              description: "Parameters for the operation. May use ${id.output} variable references"
+            dependencies:
+              type: array
+              items:
+                type: string
+              description: "IDs of instructions that must complete first"
+            description:
+              type: string
+              description: "Human-readable description of what this step does"
+            estimated_tokens:
+              type: integer
+              description: "Estimated context token budget for this instruction (optional)"
+          required: [id, op, params, description]
+    required: [title, description, tier, context, phases, acceptance_criteria, file_references, risks, metadata, reasoning, operator_runbook, grounding_gates, grounding_snapshot, instructions]

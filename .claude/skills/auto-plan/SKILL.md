@@ -1,6 +1,6 @@
 ---
 name: auto-plan
-description: Auto-detect and handle requests to create development plans in the background using plan-forge
+description: ALWAYS INVOKE when user asks to plan, create a plan, or needs a development plan - spawns plan-forge agent in background
 ---
 
 # Plan Skill

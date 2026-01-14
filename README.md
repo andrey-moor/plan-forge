@@ -23,7 +23,7 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 ## Features
 
 - **Iterative Plan-Review Loop**: Generates plans, reviews them for gaps and clarity, and refines until quality threshold is met
-- **Multiple LLM Providers**: Supports Anthropic, OpenAI, LiteLLM, and other providers via [goose](https://github.com/block/goose)
+- **Multiple LLM Providers**: Supports Anthropic, OpenAI, LiteLLM, Microsoft Foundry, and other providers via [goose](https://github.com/block/goose)
 - **MCP Server**: Expose planning tools to AI assistants (Claude Code, Cursor, VS Code)
 - **Customizable Recipes**: Configure prompts, models, and MCP server extensions via YAML files
 - **Structured Output**: Plans are validated against JSON schemas and exported as markdown
@@ -35,6 +35,21 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 
 - Rust 1.91+ (uses edition 2024)
 - An API key for your chosen LLM provider
+
+**Platform-specific requirements:**
+
+| Platform | Requirements |
+|----------|--------------|
+| **Linux** | System libraries (see below) |
+| **macOS** | No additional dependencies |
+| **Windows** | [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with "Desktop Development with C++" workload |
+
+**Linux** (Debian/Ubuntu):
+```bash
+sudo apt-get install libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libdbus-1-dev
+```
+
+**Windows**: For minimal install, select only MSVC v143 build tools + Windows 11 SDK
 
 ### Installation
 
@@ -53,8 +68,14 @@ cargo install --path .
 ### First Run
 
 ```bash
-# Set your API key
+# Set your API key (Linux/macOS)
 export ANTHROPIC_API_KEY="your-key-here"
+
+# Windows PowerShell
+$env:ANTHROPIC_API_KEY="your-key-here"
+
+# Windows cmd.exe
+set ANTHROPIC_API_KEY=your-key-here
 
 # Generate a plan
 cargo run -- run --task "Add user authentication to the web app"
@@ -75,10 +96,21 @@ cargo run -- run --path requirements.md
 cargo run -- run --path requirements.md --task "Focus on security aspects"
 
 # Resume from an existing plan with feedback
-cargo run -- run --path dev/active/my-task/ --task "Use JWT instead of sessions"
+cargo run -- run --path plans/active/my-task/ --task "Use JWT instead of sessions"
 
 # Verbose logging
 cargo run -- run --task "your task" --verbose
+
+# Using LiteLLM proxy (all subagents)
+LITELLM_HOST=http://localhost:4000 \
+LITELLM_API_KEY=sk-your-key \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER=litellm \
+PLAN_FORGE_ORCHESTRATOR_MODEL=claude-opus-4.5 \
+PLAN_FORGE_PLANNER_PROVIDER=litellm \
+PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5 \
+PLAN_FORGE_REVIEWER_PROVIDER=litellm \
+PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5 \
+cargo run -- run --task "your task" --max-total-tokens -1
 ```
 
 ### CLI Options
@@ -94,10 +126,15 @@ cargo run -- run --task "your task" --verbose
 | `--reviewer-model` | | Override LLM model for review |
 | `--planner-provider` | | Override provider (anthropic, openai, litellm) |
 | `--reviewer-provider` | | Override provider for review |
-| `--max-iterations` | | Maximum iterations before giving up (default: 5) |
-| `--output` | `-o` | Output directory for plan files (default: ./dev/active) |
+| `--max-iterations` | | Maximum iterations before stopping (default: 10) |
+| `--output` | `-o` | Output directory for plan files (default: ./plans/active) |
 | `--threshold` | | Review pass threshold 0.0-1.0 (default: 0.8) |
 | `--verbose` | `-v` | Enable debug logging |
+| `--orchestrator-model` | | Override orchestrator model |
+| `--orchestrator-provider` | | Override orchestrator provider |
+| `--max-total-tokens` | | Maximum total tokens for orchestrator session (-1 for unlimited) |
+| `--session-id` | | Session ID to resume (alternative to --path for orchestrator) |
+| `--feedback` | | Feedback for resuming paused orchestrator sessions |
 
 ## Configuration
 
@@ -111,6 +148,8 @@ cargo run -- run --task "your task" --verbose
 | `OPENAI_API_KEY` | OpenAI |
 | `LITELLM_HOST` | LiteLLM |
 | `LITELLM_API_KEY` | LiteLLM |
+| `MICROSOFT_FOUNDRY_RESOURCE` | Microsoft Foundry |
+| `MICROSOFT_FOUNDRY_API_KEY` | Microsoft Foundry |
 
 **Plan-Forge Configuration** (optional overrides):
 
@@ -122,7 +161,10 @@ cargo run -- run --task "your task" --verbose
 | `PLAN_FORGE_PLANNER_MODEL` | Override planner model | - |
 | `PLAN_FORGE_REVIEWER_PROVIDER` | Override reviewer provider | - |
 | `PLAN_FORGE_REVIEWER_MODEL` | Override reviewer model | - |
+| `PLAN_FORGE_ORCHESTRATOR_PROVIDER` | Override orchestrator provider | - |
+| `PLAN_FORGE_ORCHESTRATOR_MODEL` | Override orchestrator model | - |
 | `PLAN_FORGE_RECIPE_DIR` | Directory to search for recipes | - |
+| `PLAN_FORGE_PLAN_DIR` | Output directory for plan files | plans/active |
 
 Environment variables override config file values but are themselves overridden by CLI arguments.
 
@@ -140,15 +182,15 @@ review:
   recipe: recipes/reviewer.yaml
   provider_override: null
   model_override: null
-  pass_threshold: 0.8        # Score needed to pass review (0.0-1.0)
-
-loop_config:
-  max_iterations: 5          # Max plan-review cycles
-  early_exit_on_perfect_score: true
 
 output:
   runs_dir: ./.plan-forge    # Session JSON files
-  active_dir: ./dev/active   # Final markdown output
+  active_dir: ./plans/active   # Final markdown output
+
+guardrails:
+  max_iterations: 10         # Max plan-review cycles
+  max_total_tokens: 500000   # Token budget
+  score_threshold: 0.8       # Score needed to pass review (0.0-1.0)
 ```
 
 ### Recipe Customization
@@ -312,6 +354,33 @@ plan-forge mcp plan-forge
 
 **Note:** CLI arguments like `--planner-provider` only work with the `run` subcommand, not the MCP server.
 
+### Microsoft Foundry
+
+Microsoft Foundry (Azure AI Foundry) provides access to Claude and other models through Azure.
+
+**Note:** Requires the [forked goose with Foundry support](https://github.com/andrey-moor/goose).
+
+**Environment variables:**
+
+```bash
+export MICROSOFT_FOUNDRY_RESOURCE="your-resource-name"
+export MICROSOFT_FOUNDRY_API_KEY="your-api-key"
+```
+
+**Usage:**
+
+```bash
+MICROSOFT_FOUNDRY_RESOURCE="foundry-myresource" \
+MICROSOFT_FOUNDRY_API_KEY="your-key" \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_ORCHESTRATOR_MODEL="claude-opus-4-5" \
+PLAN_FORGE_PLANNER_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_PLANNER_MODEL="claude-opus-4-5" \
+PLAN_FORGE_REVIEWER_PROVIDER="microsoft_foundry" \
+PLAN_FORGE_REVIEWER_MODEL="claude-opus-4-5" \
+cargo run -- run --task "your task" --max-total-tokens -1
+```
+
 ## MCP Extensions
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers provide tools to the LLM agent.
@@ -356,6 +425,12 @@ See [MCP Servers](https://github.com/modelcontextprotocol/servers) for more opti
 
 ## Architecture
 
+Plan-forge supports two execution modes:
+
+### Legacy Mode (Default)
+
+The deterministic loop controller runs a fixed plan-review-update cycle:
+
 ```text
 Task Description
        │
@@ -384,13 +459,61 @@ Task Description
     └────┘
 ```
 
+### Orchestrator Mode (Default)
+
+The LLM-powered orchestrator is now the default mode. It makes dynamic decisions about the planning workflow:
+
+- Uses goose's in-process MCP extension pattern for tool coordination
+- Enforces 6 mandatory conditions that require human approval (security, sensitive files, low scores, iteration limits, API changes, data deletion)
+- Implements hard stops for token budget, max iterations, and timeouts
+- Supports pausing for human input and resuming sessions
+
+```bash
+# Run with orchestrator (default)
+cargo run -- run --task "your task"
+
+# With token budget limit
+cargo run -- run --task "your task" --max-total-tokens 100000
+
+# Unlimited tokens
+cargo run -- run --task "your task" --max-total-tokens -1
+```
+
+**With LiteLLM proxy:**
+
+```bash
+LITELLM_HOST=http://localhost:4000 \
+LITELLM_API_KEY=sk- \
+PLAN_FORGE_ORCHESTRATOR_PROVIDER=litellm \
+PLAN_FORGE_ORCHESTRATOR_MODEL=claude-opus-4.5 \
+PLAN_FORGE_PLANNER_PROVIDER=litellm \
+PLAN_FORGE_PLANNER_MODEL=claude-opus-4.5 \
+PLAN_FORGE_REVIEWER_PROVIDER=litellm \
+PLAN_FORGE_REVIEWER_MODEL=claude-opus-4.5 \
+cargo run -- run --path requirements.md --max-total-tokens -1
+```
+
+**Orchestrator Guardrails:**
+
+The orchestrator enforces hard stops that cannot be bypassed:
+
+| Hard Stop | Trigger |
+|-----------|---------|
+| MaxIterations | Exceeds configured max iterations (default: 10) |
+| TokenBudget | Exceeds max total tokens |
+| Timeout | Exceeds execution timeout |
+
+Human input is requested only when the LLM reviewer flags `requires_human_input: true` for security concerns, ambiguous requirements, or architectural decisions.
+
+Review pass/fail is determined deterministically: score >= threshold (default 0.80).
+
 ### Core Flow
 
 1. **Planner** generates a structured plan using the LLM with codebase exploration tools
 2. **Hard Checks** validate plan structure (has phases, tasks, acceptance criteria)
 3. **Reviewer** evaluates gaps, clarity, and feasibility via LLM
-4. **Loop Controller** decides: refine (score < threshold) or accept (score >= threshold)
-5. **Output** writes final markdown files to `./dev/active/<task-slug>/`
+4. **Loop Controller** (or Orchestrator) decides: refine (score < threshold) or accept (score >= threshold)
+5. **Output** writes final markdown files to `./plans/active/<task-slug>/`
 
 ### Output Structure
 
@@ -405,7 +528,7 @@ Task Description
 
 **Final output** (Markdown, committed):
 ```text
-./dev/active/<task-slug>/
+./plans/active/<task-slug>/
 ├── <task-slug>-plan.md      # Overview, phases, risks
 ├── <task-slug>-tasks.md     # Detailed task breakdown
 └── <task-slug>-context.md   # Context for handoff
@@ -460,7 +583,17 @@ Add to your project's `.mcp.json`:
 | `plan_status` | Get session status (ready/in_progress/needs_input/approved/max_turns) |
 | `plan_list` | List all planning sessions |
 | `plan_get` | Read plan, tasks, or context markdown files |
-| `plan_approve` | Force approve a plan and write to dev/active/ |
+| `plan_approve` | Force approve a plan and write to plans/active/ |
+
+**`plan_run` parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `task` | Task description (required for new sessions) |
+| `session_id` | Resume an existing session |
+| `reset_turns` | Reset turn counter when resuming |
+| `use_orchestrator` | Enable LLM-powered orchestrator mode |
+| `human_response` | Provide human response when resuming paused session |
 
 ### Session Status
 
@@ -511,4 +644,4 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Acknowledgments
 
-Built on [goose](https://github.com/block/goose) by Block, Inc.
+Built on [goose](https://github.com/block/goose) by Block, Inc. Uses a [fork with Microsoft Foundry support](https://github.com/andrey-moor/goose).

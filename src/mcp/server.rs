@@ -19,11 +19,11 @@ use std::{
 };
 
 use crate::{
-    CliConfig, FileOutputWriter, GoosePlanner, GooseReviewer, LoopController, OutputConfig,
-    OutputWriter, Plan, ResumeState, generate_slug, slugify,
+    CliConfig, FileOutputWriter, GooseOrchestrator, HumanResponse, OutputConfig, OutputWriter,
+    Plan, SessionRegistry, generate_slug, slugify,
 };
 
-use super::status::{SessionInfo, SessionStatus, derive_status, list_sessions};
+use super::status::{SessionInfo, derive_status, list_sessions};
 
 // ============================================================================
 // Session Metadata
@@ -87,9 +87,11 @@ pub struct PlanRunParams {
     pub task: String,
     /// Session ID to resume. If not provided, creates new session or uses current.
     pub session_id: Option<String>,
-    /// Reset turns counter when resuming (default: false)
-    #[serde(default)]
-    pub reset_turns: bool,
+    /// Feedback for resuming paused sessions. Use natural language:
+    /// - Answer questions: "Use JWT with 24h expiry"
+    /// - Approve: "Looks good, proceed"
+    /// - Request changes: "Please revise to use PostgreSQL"
+    pub feedback: Option<String>,
 }
 
 /// Parameters for the plan_approve tool
@@ -116,6 +118,8 @@ pub struct PlanForgeServer {
     config: Arc<CliConfig>,
     /// Base directory (where .plan-forge/ lives)
     base_dir: PathBuf,
+    /// Session registry for orchestrator mode (shared across sessions)
+    session_registry: Arc<SessionRegistry>,
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -129,14 +133,14 @@ impl ServerHandler for PlanForgeServer {
             r#"Plan-Forge: AI-powered development planning tool.
 
 This server provides tools for creating, reviewing, and managing development plans.
-Plans are stored in .plan-forge/<session>/ and output to ./dev/active/<session>/.
+Plans are stored in .plan-forge/<session>/ and output to ./plans/active/<session>/.
 
 Available tools:
 - plan_run: Create a new planning session or resume an existing one
 - plan_status: Check the status of a planning session
 - plan_list: List all planning sessions
-- plan_get: Read plan, tasks, or context markdown files
-- plan_approve: Force approve a plan (write to dev/active/ even if review failed)
+- plan_get: Read plan or dag files
+- plan_approve: Force approve a plan (write to plans/active/ even if review failed)
 
 Current directory: {cwd}
 "#
@@ -179,6 +183,7 @@ impl PlanForgeServer {
             current_session: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             base_dir,
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 
@@ -192,6 +197,7 @@ impl PlanForgeServer {
             current_session: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             base_dir,
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 
@@ -269,8 +275,9 @@ impl PlanForgeServer {
 
         let info = derive_status(
             &session_dir,
-            self.config.review.pass_threshold,
-            self.config.loop_config.max_iterations,
+            self.config.score_threshold(),
+            self.config.guardrails.max_iterations,
+            self.config.guardrails.max_total_tokens,
         )
         .map_err(|e| {
             ErrorData::new(
@@ -321,8 +328,9 @@ impl PlanForgeServer {
             let session_dir = self.session_dir(&session_id);
             if let Ok(info) = derive_status(
                 &session_dir,
-                self.config.review.pass_threshold,
-                self.config.loop_config.max_iterations,
+                self.config.score_threshold(),
+                self.config.guardrails.max_iterations,
+                self.config.guardrails.max_total_tokens,
             ) {
                 session_infos.push(info);
             }
@@ -341,12 +349,12 @@ impl PlanForgeServer {
         ]))
     }
 
-    /// Read plan content from dev/active/ directory.
+    /// Read plan content from plans/active/ directory.
     ///
-    /// Reads one of the plan markdown files: plan, tasks, or context.
+    /// Reads the plan markdown or DAG JSON file.
     #[tool(
         name = "plan_get",
-        description = "Read plan content. Specify file='plan', 'tasks', or 'context' to read the corresponding markdown file from dev/active/<session>/."
+        description = "Read plan content. Specify file='plan' for the markdown plan, or file='dag' for the JSON execution DAG."
     )]
     pub async fn plan_get(
         &self,
@@ -367,22 +375,18 @@ impl PlanForgeServer {
 
         let filename = match file_type.as_str() {
             "plan" => format!("{}-plan.md", slug),
-            "tasks" => format!("{}-tasks.md", slug),
-            "context" => format!("{}-context.md", slug),
+            "dag" => format!("{}-dag.json", slug),
             _ => {
                 return Err(ErrorData::new(
                     ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Invalid file type '{}'. Use 'plan', 'tasks', or 'context'.",
-                        file_type
-                    ),
+                    format!("Invalid file type '{}'. Use 'plan' or 'dag'.", file_type),
                     None,
                 ));
             }
         };
 
-        // Files are in dev/active/<slug>/<slug>-<type>.md
-        let file_path = self.base_dir.join("dev/active").join(&slug).join(&filename);
+        // Files are in plans/active/<slug>/<slug>-<type>.<ext>
+        let file_path = self.config.output.active_dir.join(&slug).join(&filename);
 
         let content = std::fs::read_to_string(&file_path).map_err(|e| {
             ErrorData::new(
@@ -418,79 +422,18 @@ impl PlanForgeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let task = params.0.task.clone();
         let session_id = params.0.session_id.clone();
-        let reset_turns = params.0.reset_turns;
+        let feedback = params.0.feedback;
 
-        // Determine if this is a new session or resume
-        let (task_slug, resume_state, is_new_session) = if let Some(sid) = session_id {
-            // Resume existing session
-            let session_dir = self.session_dir(&sid);
-
-            if !session_dir.exists() {
-                return Err(ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("Session '{}' not found", sid),
-                    None,
-                ));
-            }
-
-            // Load latest plan for resume
-            let resume = self.load_resume_state(&session_dir, &task, reset_turns)?;
-            (sid, Some(resume), false)
-        } else {
-            // Check if we have a current session to resume
-            let current = self.current_session.read().ok().and_then(|c| c.clone());
-
-            if let Some(sid) = current {
-                let session_dir = self.session_dir(&sid);
-                let info = derive_status(
-                    &session_dir,
-                    self.config.review.pass_threshold,
-                    self.config.loop_config.max_iterations,
-                )
-                .ok();
-
-                // If current session is in a resumable state, resume it
-                if let Some(info) = info {
-                    match info.status {
-                        // Ready = just created, no plan files yet (retry while first call in progress)
-                        // Just reuse the session_id, don't try to load resume state
-                        SessionStatus::Ready => {
-                            self.set_current_session(sid.clone());
-                            return self.run_loop(sid, task, None, false).await;
-                        }
-                        // Has plan files, can resume with existing state
-                        SessionStatus::NeedsInput
-                        | SessionStatus::MaxTurns
-                        | SessionStatus::InProgress => {
-                            let resume =
-                                self.load_resume_state(&session_dir, &task, reset_turns)?;
-                            self.set_current_session(sid.clone());
-                            return self.run_loop(sid, task, Some(resume), false).await;
-                        }
-                        // Approved = completed, fall through to create new session
-                        SessionStatus::Approved => {}
-                    }
-                }
-            }
-
-            // New session - generate slug using LLM
-            let (provider, model) = self.get_slug_provider_model();
-            let slug = generate_slug(&task, &provider, &model).await;
-            (slug, None, true)
-        };
-
-        // Set current session BEFORE run_loop to prevent duplicate directories on retries
-        self.set_current_session(task_slug.clone());
-        self.run_loop(task_slug, task, resume_state, is_new_session)
-            .await
+        // Always use the orchestrator mode
+        self.run_orchestrator(task, session_id, feedback).await
     }
 
-    /// Force approve a session and write to dev/active/.
+    /// Force approve a session and write to plans/active/.
     ///
     /// Use this to approve a plan even if it didn't pass review.
     #[tool(
         name = "plan_approve",
-        description = "Force approve a planning session and write output to dev/active/. Use when you want to proceed with a plan even if it didn't pass automated review."
+        description = "Force approve a planning session and write output to plans/active/. Use when you want to proceed with a plan even if it didn't pass automated review."
     )]
     pub async fn plan_approve(
         &self,
@@ -508,10 +451,10 @@ impl PlanForgeServer {
             .map(|m| m.slug)
             .unwrap_or_else(|_| slugify(&plan.title));
 
-        // Write to dev/active/ with the session slug
+        // Write to active_dir with the session slug
         let output = FileOutputWriter::new(OutputConfig {
             runs_dir: session_dir.clone(),
-            active_dir: self.base_dir.join("dev/active"),
+            active_dir: self.config.output.active_dir.clone(),
             slug: Some(slug.clone()),
         });
 
@@ -524,8 +467,9 @@ impl PlanForgeServer {
         })?;
 
         let response = format!(
-            "Plan '{}' approved and written to dev/active/{}/",
-            plan.title, slug
+            "Plan '{}' approved and written to {}/",
+            plan.title,
+            self.config.output.active_dir.join(&slug).display()
         );
 
         Ok(CallToolResult::success(vec![
@@ -590,51 +534,6 @@ impl PlanForgeServer {
         })
     }
 
-    /// Load resume state from session directory
-    fn load_resume_state(
-        &self,
-        session_dir: &PathBuf,
-        feedback: &str,
-        reset_turns: bool,
-    ) -> Result<ResumeState, ErrorData> {
-        let plan = self.load_latest_plan(session_dir)?;
-
-        // Find highest iteration
-        let mut highest_iteration = 0u32;
-        if let Ok(entries) = std::fs::read_dir(session_dir) {
-            for entry in entries.flatten() {
-                let filename = entry.file_name();
-                let filename_str = filename.to_string_lossy();
-
-                if let Some(iter_str) = filename_str
-                    .strip_prefix("plan-iteration-")
-                    .and_then(|s| s.strip_suffix(".json"))
-                    && let Ok(iter) = iter_str.parse::<u32>()
-                {
-                    highest_iteration = highest_iteration.max(iter);
-                }
-            }
-        }
-
-        let start_iteration = if reset_turns {
-            1
-        } else {
-            highest_iteration + 1
-        };
-
-        let feedback_items = if feedback.is_empty() {
-            Vec::new()
-        } else {
-            vec![format!("[USER FEEDBACK] {}", feedback)]
-        };
-
-        Ok(ResumeState {
-            plan,
-            feedback: feedback_items,
-            start_iteration,
-        })
-    }
-
     /// Save session metadata to session directory
     fn save_session_meta(&self, session_dir: &Path, meta: &SessionMeta) -> Result<(), ErrorData> {
         let meta_path = session_dir.join("session-meta.json");
@@ -691,16 +590,30 @@ impl PlanForgeServer {
         (provider, model)
     }
 
-    /// Run the planning loop
-    async fn run_loop(
+    /// Run the orchestrator for a task.
+    async fn run_orchestrator(
         &self,
-        task_slug: String,
         task: String,
-        resume_state: Option<ResumeState>,
-        is_new_session: bool,
+        session_id: Option<String>,
+        feedback: Option<String>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Note: current_session is set by caller (plan_run) BEFORE calling run_loop
-        // to prevent duplicate directories when agent retries without session_id
+        // Generate slug for new sessions or use provided session_id
+        let task_slug = if let Some(sid) = session_id.as_ref() {
+            sid.clone()
+        } else {
+            // Check if we have a current session
+            let current = self.current_session.read().ok().and_then(|c| c.clone());
+            if let Some(sid) = current {
+                sid
+            } else {
+                // New session - generate slug using LLM
+                let (provider, model) = self.get_slug_provider_model();
+                generate_slug(&task, &provider, &model).await
+            }
+        };
+
+        // Set current session
+        self.set_current_session(task_slug.clone());
 
         // Create session directory
         let session_dir = self.session_dir(&task_slug);
@@ -713,47 +626,54 @@ impl PlanForgeServer {
         })?;
 
         // Save session metadata for new sessions
-        if is_new_session {
+        if session_id.is_none() {
             let meta = SessionMeta::new(task_slug.clone(), task.clone());
             self.save_session_meta(&session_dir, &meta)?;
         }
 
-        // Set up config with session paths
-        let mut config = (*self.config).clone();
-        config.output.runs_dir = session_dir.clone();
-        config.output.active_dir = self.base_dir.join("dev/active");
-        // Set the slug so output files use the same directory name
-        config.output.slug = Some(task_slug.clone());
+        // Convert feedback string to HumanResponse
+        // Natural language in feedback handles approve/revise/answer semantics
+        let hr = feedback.map(|text| HumanResponse {
+            response: text,
+            approved: true, // Natural language in feedback handles intent
+        });
 
-        // Determine base directory for recipes
-        let base_dir = self.base_dir.clone();
+        // Create orchestrator with shared session registry
+        let orchestrator = GooseOrchestrator::new(
+            self.config.orchestrator.clone(),
+            self.config.guardrails.clone(),
+            self.config.output.clone(),
+            self.base_dir.clone(),
+            session_dir.clone(),
+            self.session_registry.clone(),
+        );
 
-        // Create components
-        let planner = GoosePlanner::new(config.planning.clone(), base_dir.clone());
-        let reviewer = GooseReviewer::new(config.review.clone(), base_dir);
-        let output = FileOutputWriter::new(config.output.clone());
-
-        // Create loop controller
-        let mut controller = LoopController::new(planner, reviewer, output, config)
-            .with_task_slug(task_slug.clone());
-
-        // Apply resume state if present
-        if let Some(resume) = resume_state {
-            controller = controller.with_resume(resume);
-        }
-
-        // Run the loop
-        let result = controller.run(task, None).await;
+        // Run orchestrator
+        let working_dir = Some(self.base_dir.clone());
+        let result = orchestrator
+            .run(task, working_dir, hr, Some(task_slug.clone()))
+            .await;
 
         match result {
             Ok(result) => {
+                // Determine status string
+                let status = match &result.status {
+                    crate::orchestrator::OrchestrationStatus::Completed => "approved",
+                    crate::orchestrator::OrchestrationStatus::CompletedBestEffort => "best_effort",
+                    crate::orchestrator::OrchestrationStatus::Running => "in_progress",
+                    crate::orchestrator::OrchestrationStatus::Paused { .. } => "needs_input",
+                    crate::orchestrator::OrchestrationStatus::HardStopped { .. } => "hard_stopped",
+                    crate::orchestrator::OrchestrationStatus::Failed { .. } => "failed",
+                };
+
                 let response = serde_json::json!({
                     "session_id": task_slug,
-                    "status": if result.success { "approved" } else { "max_turns" },
-                    "iterations": result.total_iterations,
-                    "score": result.final_review.llm_review.score,
-                    "title": result.final_plan.title,
-                    "summary": result.final_review.summary,
+                    "status": status,
+                    "iterations": result.iterations,
+                    "tool_calls": result.tool_calls,
+                    "total_tokens": result.total_tokens,
+                    "best_score": result.best_score,
+                    "has_plan": result.final_plan.is_some(),
                 });
 
                 Ok(CallToolResult::success(vec![
@@ -761,38 +681,11 @@ impl PlanForgeServer {
                         .with_audience(vec![Role::Assistant]),
                 ]))
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-
-                // Check if this is a human input required error
-                if error_msg.contains("Human input required") {
-                    let info = derive_status(
-                        &session_dir,
-                        self.config.review.pass_threshold,
-                        self.config.loop_config.max_iterations,
-                    )
-                    .ok();
-
-                    let response = serde_json::json!({
-                        "session_id": task_slug,
-                        "status": "needs_input",
-                        "reason": info.as_ref().and_then(|i| i.input_reason.clone()),
-                        "iteration": info.as_ref().map(|i| i.iteration),
-                        "score": info.as_ref().and_then(|i| i.latest_score),
-                    });
-
-                    return Ok(CallToolResult::success(vec![
-                        Content::text(serde_json::to_string_pretty(&response).unwrap_or_default())
-                            .with_audience(vec![Role::Assistant]),
-                    ]));
-                }
-
-                Err(ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Planning failed: {}", error_msg),
-                    None,
-                ))
-            }
+            Err(e) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Orchestrator failed: {}", e),
+                None,
+            )),
         }
     }
 }

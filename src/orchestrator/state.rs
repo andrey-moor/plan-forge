@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 use crate::models::{Plan, ReviewResult};
 
 /// State for resuming from an existing plan
@@ -11,110 +14,46 @@ pub struct ResumeState {
     pub start_iteration: u32,
 }
 
-/// State maintained across the feedback loop
-#[derive(Debug, Clone)]
-pub struct LoopState {
-    /// Current iteration number (starts at 0, incremented before each iteration)
-    pub iteration: u32,
-    /// Maximum allowed iterations
-    pub max_iterations: u32,
-    /// The current plan (None before first generation)
-    pub current_plan: Option<Plan>,
-    /// History of all reviews performed
-    pub review_history: Vec<ReviewResult>,
-    /// Context preserved across iterations
-    pub conversation_context: ConversationContext,
-}
-
-/// Context that needs to be preserved and passed between iterations
-#[derive(Debug, Clone)]
-pub struct ConversationContext {
-    /// Key insights discovered during planning
-    pub preserved_context: Vec<String>,
-    /// Review feedback to incorporate in next iteration
-    pub pending_feedback: Vec<String>,
-    /// The original task description
-    pub original_task: String,
-    /// Working directory for the planning task
-    pub working_dir: Option<String>,
-}
-
-impl LoopState {
-    /// Create a new loop state for a given task
-    pub fn new(task: String, max_iterations: u32, working_dir: Option<String>) -> Self {
-        Self {
-            iteration: 0,
-            max_iterations,
-            current_plan: None,
-            review_history: Vec::new(),
-            conversation_context: ConversationContext {
-                preserved_context: Vec::new(),
-                pending_feedback: Vec::new(),
-                original_task: task,
-                working_dir,
-            },
-        }
-    }
-
-    /// Check if the loop should continue
-    pub fn should_continue(&self) -> bool {
-        // Stop if we've reached max iterations
-        if self.iteration >= self.max_iterations {
-            return false;
-        }
-
-        // Continue if no review yet (first iteration)
-        if self.review_history.is_empty() {
-            return true;
-        }
-
-        // Continue if the latest review failed
-        self.review_history
-            .last()
-            .map(|r| !r.passed)
-            .unwrap_or(true)
-    }
-
-    /// Increment iteration counter
-    pub fn next_iteration(&mut self) {
-        self.iteration += 1;
-    }
-
-    /// Update pending feedback from the latest review
-    pub fn update_feedback_from_review(&mut self, review: &ReviewResult) {
-        self.conversation_context.pending_feedback = review.extract_feedback();
-    }
-
-    /// Get the latest review result
-    pub fn latest_review(&self) -> Option<&ReviewResult> {
-        self.review_history.last()
-    }
-
-    /// Check if this is the first iteration
-    pub fn is_first_iteration(&self) -> bool {
-        self.iteration == 1
-    }
-}
-
 /// Result of the entire loop execution
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LoopResult {
+    /// The final plan (parsed from JSON)
     pub final_plan: Plan,
+    /// The final plan as raw JSON (for orchestrator mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_plan_json: Option<Value>,
+    /// Total iterations completed
     pub total_iterations: u32,
+    /// The final review result
     pub final_review: ReviewResult,
+    /// Whether the session was successful
     pub success: bool,
+    /// Best review score achieved (orchestrator mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_score: Option<f32>,
+    /// Total tokens consumed (orchestrator mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 impl LoopResult {
-    pub fn new(state: &LoopState) -> Option<Self> {
-        let plan = state.current_plan.clone()?;
-        let review = state.review_history.last()?.clone();
-
-        Some(Self {
+    /// Create a LoopResult from orchestration data
+    pub fn from_orchestration(
+        plan: Plan,
+        plan_json: Option<Value>,
+        iterations: u32,
+        review: ReviewResult,
+        best_score: Option<f32>,
+        total_tokens: Option<u64>,
+    ) -> Self {
+        Self {
             final_plan: plan,
-            total_iterations: state.iteration,
-            final_review: review.clone(),
+            final_plan_json: plan_json,
+            total_iterations: iterations,
             success: review.passed,
-        })
+            final_review: review,
+            best_score,
+            total_tokens,
+        }
     }
 }

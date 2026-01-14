@@ -89,30 +89,44 @@ Both use the same underlying plan-forge MCP tools and background agent.
 
 When you check on a background agent (via TaskOutput) and it returns with `status="needs_input"`:
 
-1. **Store the agentId** for later resume
-2. **Present questions clearly** to user:
+1. **Draft plan is visible** - The plan is automatically written to `dev/active/<slug>/` with "DRAFT - Awaiting Human Input" status so users can review it
+2. **Parse the reviewer's questions** from the `reason` field
+3. **Present questions interactively** using the AskUserQuestion tool when possible:
 
-   "**Planning paused** - the reviewer needs your input:
-
-   {reason from agent response}
-
-   Please provide your answers and I'll continue planning."
-
-3. **When user responds**, resume the same agent:
+   Example - if reason contains architectural decision questions:
    ```
-   Task tool:
-   - prompt: "User provided these answers: {user_response}"
-   - subagent_type: plan-forge
-   - resume: {stored agentId}
-   - run_in_background: true
+   AskUserQuestion:
+     questions:
+       - question: "Which storage mechanism should be used?"
+         header: "Storage"
+         options:
+           - label: "Redis"
+             description: "In-memory cache, good for sessions"
+           - label: "PostgreSQL"
+             description: "Persistent, good for user data"
+           - label: "File-based"
+             description: "Simple, no external dependencies"
+         multiSelect: false
    ```
 
-This uses Claude Code's resumable subagents feature - the agent continues with full context and remembers what questions it asked.
+4. **When user responds**, resume using `feedback` parameter:
+   ```
+   plan_run(
+     task="",
+     session_id="<session-slug>",
+     feedback="Use Redis for session storage"
+   )
+   ```
+
+**When to use AskUserQuestion vs free text:**
+- Use options when reviewer lists specific alternatives (storage, auth, etc.)
+- Use free text when questions are open-ended or need custom answers
+- Always include "Other" option via the tool's default behavior
 
 ## Notes
 
 - Always use background execution for new plans
 - User can continue conversation while planning runs
-- Plans are saved to `dev/active/<slug>/` when complete
+- **Draft plans are visible**: When paused, plans are written to `dev/active/<slug>/` with "DRAFT" status
 - If plan needs human input, agent stops and returns with `needs_input` status
-- Use the `resume` parameter to continue the same agent with user's answers
+- Use the `feedback` parameter in `plan_run` to continue with user's answers
