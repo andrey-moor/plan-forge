@@ -3,7 +3,7 @@
 #
 # This hook prevents Claude from exiting until either:
 # - Simple mode: completion promise is detected
-# - Plan mode: all required acceptance criteria pass
+# - Plan mode: ALL Phase task checkboxes are marked [x] AND acceptance criteria pass
 #
 # State file: .claude/ralph-loop.local.md (YAML frontmatter + prompt)
 
@@ -82,111 +82,116 @@ check_simple_mode() {
     return 1
 }
 
-# Check testable acceptance criteria in plan mode
+# Check if all Phase task checkboxes are marked complete in plan markdown
+check_markdown_tasks() {
+    local plan_md="$1"
+
+    if [[ ! -f "$plan_md" ]]; then
+        debug "Plan markdown not found: $plan_md"
+        return 1
+    fi
+
+    # Count Phase checkpoint checkboxes: - [ ] **X.Y ...** or - [x] **X.Y ...**
+    # Pattern: checkbox followed by bold text starting with number.number
+    local total_tasks
+    total_tasks=$(grep -cE '^\s*-\s*\[.\]\s*\*\*[0-9]+\.[0-9]+' "$plan_md" 2>/dev/null | tr -d '[:space:]')
+    total_tasks=${total_tasks:-0}
+
+    local done_tasks
+    done_tasks=$(grep -ciE '^\s*-\s*\[x\]\s*\*\*[0-9]+\.[0-9]+' "$plan_md" 2>/dev/null | tr -d '[:space:]')
+    done_tasks=${done_tasks:-0}
+
+    debug "Task checkboxes: $done_tasks/$total_tasks complete"
+
+    if [[ $total_tasks -eq 0 ]]; then
+        debug "No task checkboxes found in plan"
+        return 0  # No tasks to track, proceed to acceptance criteria
+    fi
+
+    if [[ $done_tasks -lt $total_tasks ]]; then
+        # Extract incomplete tasks for feedback
+        INCOMPLETE_TASKS=$(grep -E '^\s*-\s*\[ \]\s*\*\*[0-9]+\.[0-9]+' "$plan_md" | head -10)
+        TASKS_REMAINING=$((total_tasks - done_tasks))
+        export INCOMPLETE_TASKS TASKS_REMAINING
+        return 1
+    fi
+
+    return 0
+}
+
+# Check if all acceptance criteria checkboxes are marked complete in plan markdown
+check_acceptance_criteria_checkboxes() {
+    local plan_md="$1"
+
+    if [[ ! -f "$plan_md" ]]; then
+        debug "Plan markdown not found: $plan_md"
+        return 1
+    fi
+
+    # Extract the Acceptance Criteria section (between "## Acceptance Criteria" and next "##" or "---")
+    local ac_section
+    ac_section=$(sed -n '/^## Acceptance Criteria/,/^##\|^---/p' "$plan_md" | grep -v '^##\|^---')
+
+    if [[ -z "$ac_section" ]]; then
+        debug "No Acceptance Criteria section found"
+        return 0  # No acceptance criteria section, proceed
+    fi
+
+    # Count checkboxes in the acceptance criteria section
+    local total_ac
+    total_ac=$(echo "$ac_section" | grep -cE '^\s*-\s*\[.\]' 2>/dev/null | tr -d '[:space:]')
+    total_ac=${total_ac:-0}
+
+    local done_ac
+    done_ac=$(echo "$ac_section" | grep -ciE '^\s*-\s*\[x\]' 2>/dev/null | tr -d '[:space:]')
+    done_ac=${done_ac:-0}
+
+    debug "Acceptance criteria checkboxes: $done_ac/$total_ac complete"
+
+    if [[ $total_ac -eq 0 ]]; then
+        debug "No acceptance criteria checkboxes found"
+        return 0  # No checkboxes in AC section, proceed
+    fi
+
+    if [[ $done_ac -lt $total_ac ]]; then
+        # Extract incomplete acceptance criteria for feedback
+        INCOMPLETE_AC=$(echo "$ac_section" | grep -E '^\s*-\s*\[ \]' | head -10)
+        AC_REMAINING=$((total_ac - done_ac))
+        export INCOMPLETE_AC AC_REMAINING
+        return 1
+    fi
+
+    return 0
+}
+
+# Check plan completion in plan mode
+# Verifies both task checkboxes AND acceptance criteria checkboxes are complete
 check_plan_mode() {
     local plan_path="$1"
     local plan_slug="$2"
 
-    # Find the plan JSON file
-    local plan_json="${plan_path}/${plan_slug}-plan.json"
-    if [[ ! -f "$plan_json" ]]; then
-        # Try finding iteration files in .plan-forge/
-        plan_json=$(find ".plan-forge/${plan_slug}/" -name "plan-iteration-*.json" 2>/dev/null | sort -V | tail -1)
+    # Find plan markdown file - try new naming first, then old
+    local plan_md="${plan_path}/${plan_slug}-plan.md"
+    if [[ ! -f "$plan_md" ]]; then
+        plan_md="${plan_path}/${plan_slug}-execution-plan.md"
     fi
 
-    if [[ -z "$plan_json" || ! -f "$plan_json" ]]; then
-        debug "Plan JSON not found at $plan_path or .plan-forge/$plan_slug/"
-        # Can't verify, allow continuation
+    # STEP 1: Check all task checkboxes are complete (Phase tasks with **X.Y format)
+    if ! check_markdown_tasks "$plan_md"; then
+        debug "Not all tasks complete"
         return 1
     fi
 
-    debug "Checking acceptance criteria from: $plan_json"
+    debug "All tasks complete, checking acceptance criteria checkboxes..."
 
-    # Extract acceptance criteria
-    local criteria
-    criteria=$(jq -r '.acceptance_criteria // []' "$plan_json")
-
-    if [[ "$criteria" == "[]" || -z "$criteria" ]]; then
-        debug "No acceptance criteria found in plan"
+    # STEP 2: Check all acceptance criteria checkboxes are complete
+    if ! check_acceptance_criteria_checkboxes "$plan_md"; then
+        debug "Not all acceptance criteria complete"
         return 1
     fi
 
-    # Check each testable criterion
-    local total=0
-    local passed=0
-    local failed_criteria=""
-
-    while IFS= read -r criterion; do
-        local description priority testable
-        description=$(echo "$criterion" | jq -r '.description // ""')
-        priority=$(echo "$criterion" | jq -r '.priority // "Recommended"')
-        testable=$(echo "$criterion" | jq -r '.testable // false')
-
-        # Only check testable, required criteria
-        if [[ "$testable" != "true" ]]; then
-            continue
-        fi
-
-        ((total++)) || true
-
-        # Run verification based on description patterns
-        local result=1
-
-        case "$description" in
-            *"cargo check"*|*"compiles successfully"*)
-                cargo check 2>/dev/null && result=0
-                ;;
-            *"cargo test"*|*"tests pass"*)
-                cargo test 2>/dev/null && result=0
-                ;;
-            *"cargo clippy"*)
-                cargo clippy -- -D warnings 2>/dev/null && result=0
-                ;;
-            *"cargo build"*)
-                cargo build 2>/dev/null && result=0
-                ;;
-            *"file "*" exists"*|*"exists"*)
-                # Extract file path from description
-                local filepath
-                filepath=$(echo "$description" | grep -oE "'[^']+'" | tr -d "'" | head -1)
-                if [[ -n "$filepath" && -f "$filepath" ]]; then
-                    result=0
-                fi
-                ;;
-            *"file "*" does not exist"*)
-                local filepath
-                filepath=$(echo "$description" | grep -oE "'[^']+'" | tr -d "'" | head -1)
-                if [[ -n "$filepath" && ! -f "$filepath" ]]; then
-                    result=0
-                fi
-                ;;
-            *)
-                # Unknown pattern, skip
-                debug "Unknown criterion pattern: $description"
-                ((total--)) || true
-                continue
-                ;;
-        esac
-
-        if [[ $result -eq 0 ]]; then
-            ((passed++)) || true
-            debug "PASS: $description"
-        else
-            failed_criteria="${failed_criteria}\n- $description"
-            debug "FAIL: $description"
-        fi
-    done < <(echo "$criteria" | jq -c '.[]')
-
-    debug "Criteria check: $passed/$total passed"
-
-    # All testable criteria must pass
-    if [[ $total -gt 0 && $passed -eq $total ]]; then
-        return 0
-    fi
-
-    # Store failed criteria for feedback
-    export FAILED_CRITERIA="$failed_criteria"
-    return 1
+    debug "All acceptance criteria complete!"
+    return 0
 }
 
 # Update state file with incremented iteration
@@ -213,28 +218,44 @@ build_plan_feedback() {
     local plan_slug="$2"
     local iteration="$3"
 
+    # Find plan markdown file - try new naming first, then old
     local plan_md="${plan_path}/${plan_slug}-plan.md"
-    local tasks_md="${plan_path}/${plan_slug}-tasks.md"
+    if [[ ! -f "$plan_md" ]]; then
+        plan_md="${plan_path}/${plan_slug}-execution-plan.md"
+    fi
 
     local feedback=""
     feedback+="## Ralph Loop - Iteration $iteration\n\n"
-    feedback+="The plan-forge acceptance criteria have not all passed yet.\n\n"
 
-    if [[ -n "${FAILED_CRITERIA:-}" ]]; then
-        feedback+="### Failed Criteria\n${FAILED_CRITERIA}\n\n"
+    # Show incomplete tasks first (most actionable)
+    if [[ -n "${INCOMPLETE_TASKS:-}" ]]; then
+        feedback+="### Incomplete Tasks (${TASKS_REMAINING:-?} remaining)\n\n"
+        feedback+="Complete these Phase checkpoints and mark them with \`[x]\`:\n\n"
+        feedback+="\`\`\`\n${INCOMPLETE_TASKS}\n\`\`\`\n\n"
+        feedback+="**Important**: After completing each task, update the checkbox from \`[ ]\` to \`[x]\` in the plan file.\n\n"
+    fi
+
+    # Show incomplete acceptance criteria
+    if [[ -n "${INCOMPLETE_AC:-}" ]]; then
+        feedback+="### Incomplete Acceptance Criteria (${AC_REMAINING:-?} remaining)\n\n"
+        feedback+="Verify these criteria and mark them with \`[x]\` when confirmed:\n\n"
+        feedback+="\`\`\`\n${INCOMPLETE_AC}\n\`\`\`\n\n"
     fi
 
     feedback+="### Your Task\n"
-    feedback+="Continue implementing the plan. Review the tasks and work on the next incomplete item.\n\n"
-
-    if [[ -f "$plan_md" ]]; then
-        feedback+="### Plan Summary\n"
-        feedback+="\`\`\`\n$(head -50 "$plan_md")\n\`\`\`\n\n"
+    if [[ -n "${INCOMPLETE_TASKS:-}" ]]; then
+        feedback+="Work on the next incomplete task above. When done, mark its checkbox as complete in the plan file.\n\n"
+    elif [[ -n "${INCOMPLETE_AC:-}" ]]; then
+        feedback+="All tasks are done. Verify the remaining acceptance criteria and mark them as complete.\n\n"
+    else
+        feedback+="All checkboxes are complete!\n\n"
     fi
 
-    if [[ -f "$tasks_md" ]]; then
-        feedback+="### Tasks\n"
-        feedback+="\`\`\`\n$(head -100 "$tasks_md")\n\`\`\`\n\n"
+    if [[ -f "$plan_md" ]]; then
+        feedback+="### Plan File\n"
+        feedback+="Location: \`$plan_md\`\n\n"
+        feedback+="### Plan Summary\n"
+        feedback+="\`\`\`\n$(head -50 "$plan_md")\n\`\`\`\n\n"
     fi
 
     echo -e "$feedback"

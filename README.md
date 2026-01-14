@@ -8,6 +8,7 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 ## Table of Contents
 
 - [Features](#features)
+- [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -29,29 +30,50 @@ A CLI tool for iterative AI-driven development planning. Uses LLM agents to gene
 - **Structured Output**: Plans are validated against JSON schemas and exported as markdown
 - **Resume Workflow**: Pick up where you left off with feedback-driven refinement
 
-## Quick Start
+## Installation
 
-### Prerequisites
+### Shell Installer (Recommended)
 
-- Rust 1.91+ (uses edition 2024)
-- An API key for your chosen LLM provider
+The easiest way to install plan-forge on Linux or macOS:
 
-**Platform-specific requirements:**
-
-| Platform | Requirements |
-|----------|--------------|
-| **Linux** | System libraries (see below) |
-| **macOS** | No additional dependencies |
-| **Windows** | [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with "Desktop Development with C++" workload |
-
-**Linux** (Debian/Ubuntu):
 ```bash
-sudo apt-get install libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libdbus-1-dev
+curl -sSL https://raw.githubusercontent.com/andrey-moor/plan-forge/main/install.sh | sh
 ```
 
-**Windows**: For minimal install, select only MSVC v143 build tools + Windows 11 SDK
+> **Note:** Review the [install.sh](install.sh) script before running if you prefer to inspect it first.
 
-### Installation
+**Options:**
+
+```bash
+# Install specific version
+VERSION=v0.1.0 curl -sSL https://raw.githubusercontent.com/andrey-moor/plan-forge/main/install.sh | sh
+
+# Install to custom directory
+INSTALL_DIR=/opt/bin curl -sSL https://raw.githubusercontent.com/andrey-moor/plan-forge/main/install.sh | sh
+```
+
+### Binary Downloads
+
+Pre-built binaries are available from [GitHub Releases](https://github.com/andrey-moor/plan-forge/releases).
+
+**Supported platforms:**
+
+| Platform | Architecture | Archive |
+|----------|--------------|---------|
+| Linux | x86_64 | `plan-forge-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux | aarch64 (ARM64) | `plan-forge-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS | x86_64 (Intel) | `plan-forge-x86_64-apple-darwin.tar.gz` |
+| macOS | aarch64 (Apple Silicon) | `plan-forge-aarch64-apple-darwin.tar.gz` |
+| Windows | x86_64 | `plan-forge-x86_64-pc-windows-msvc.zip` |
+
+**macOS Gatekeeper:** If you get a security warning, run:
+```bash
+xattr -d com.apple.quarantine /path/to/plan-forge
+```
+
+### Build from Source
+
+Requires Rust 1.91+ (edition 2024).
 
 ```bash
 # Clone the repository
@@ -64,6 +86,20 @@ cargo build --release
 # Or install directly
 cargo install --path .
 ```
+
+## Quick Start
+
+### Prerequisites
+
+- An API key for your chosen LLM provider
+
+**Build from source requirements** (if not using binary releases):
+
+| Platform | Requirements |
+|----------|--------------|
+| **Linux** | Rust 1.91+, system libraries: `sudo apt-get install libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libdbus-1-dev` |
+| **macOS** | Rust 1.91+ |
+| **Windows** | Rust 1.91+, [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with "Desktop Development with C++" |
 
 ### First Run
 
